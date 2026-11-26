@@ -1,0 +1,6 @@
+{
+  "name": "Toko Dimas Jaya",
+  "description": "Toko sembako dan kebutuhan harian lengkap di Gang Makam, Gunung Batin Udik, Lampung Tengah.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
