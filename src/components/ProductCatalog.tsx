@@ -1,5 +1,5 @@
 import {Plus, Search, X} from 'lucide-react';
-import {formatRupiah, STORE_CATEGORIES} from '../data/storeData';
+import {formatRupiah, STORE_CATEGORIES} from '../lib/storeData';
 import type {Product, ProductCategory, ProductVariant} from '../types/store';
 import {ResilientImage} from './ResilientImage';
 

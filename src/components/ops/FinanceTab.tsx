@@ -1,5 +1,6 @@
 import {FormEvent, useState} from 'react';
-import {formatRupiah, formatShortDate} from '../../data/storeData';
+import {apiFetch} from '../../lib/apiClient';
+import {formatRupiah, formatShortDate} from '../../lib/storeData';
 import type {DivisionRole, KasbonRecord, LedgerEntry} from '../../types/store';
 
 interface FinanceTabProps {
@@ -41,7 +42,7 @@ export function FinanceTab({
     setLedgerError('');
     setSavingLedger(true);
     try {
-      const res = await fetch('/api/ops/ledger', {
+      const res = await apiFetch<{error?: string}>('/api/ops/ledger', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -55,9 +56,8 @@ export function FinanceTab({
           paymentMethod,
         }),
       });
-      const data = await res.json();
       if (!res.ok) {
-        setLedgerError(data.error || 'Gagal mencatat buku kas.');
+        setLedgerError(res.data.error || 'Gagal mencatat buku kas.');
         return;
       }
       setDescription('');
@@ -75,7 +75,7 @@ export function FinanceTab({
     const nominal = Number(payAmount || remaining);
     if (!Number.isFinite(nominal) || nominal <= 0) return;
 
-    const res = await fetch(`/api/ops/kasbon/${record.id}/pay`, {
+    const res = await apiFetch(`/api/ops/kasbon/${record.id}/pay`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

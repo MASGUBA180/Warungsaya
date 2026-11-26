@@ -5,7 +5,8 @@ import {
   formatShortDate,
   ORDER_STATUS_LABELS,
   ROLE_LABELS,
-} from '../../data/storeData';
+} from '../../lib/storeData';
+import {apiFetch} from '../../lib/apiClient';
 import type {
   DivisionRole,
   Order,
@@ -86,7 +87,7 @@ export function OwnerOverviewTab({
     setStaffSuccess('');
     setSavingStaff(true);
     try {
-      const res = await fetch('/api/ops/staff', {
+      const res = await apiFetch<{staff?: PublicStaffProfile; error?: string}>('/api/ops/staff', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -99,12 +100,13 @@ export function OwnerOverviewTab({
           passcode,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        setStaffError(data.error || 'Gagal menambah staf divisi.');
+      if (!res.ok || !res.data.staff) {
+        setStaffError(res.data.error || 'Gagal menambah staf divisi.');
         return;
       }
-      setStaffSuccess(`Akun ${data.staff.displayName} (${ROLE_LABELS[data.staff.role as DivisionRole]}) berhasil dibuat.`);
+      setStaffSuccess(
+        `Akun ${res.data.staff.displayName} (${ROLE_LABELS[res.data.staff.role as DivisionRole]}) berhasil dibuat.`
+      );
       setDisplayName('');
       setUsername('');
       setPasscode('');
@@ -118,7 +120,7 @@ export function OwnerOverviewTab({
 
   const handleToggleStaffActive = async (member: PublicStaffProfile) => {
     try {
-      const res = await fetch(`/api/ops/staff/${member.id}`, {
+      const res = await apiFetch(`/api/ops/staff/${member.id}`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -142,7 +144,7 @@ export function OwnerOverviewTab({
     setStaffError('');
     setStaffSuccess('');
     try {
-      const res = await fetch(`/api/ops/staff/${member.id}`, {
+      const res = await apiFetch<{error?: string}>(`/api/ops/staff/${member.id}`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -155,6 +157,8 @@ export function OwnerOverviewTab({
         setResetTargetId(null);
         setResetPassValue('');
         await onRefresh();
+      } else {
+        setStaffError(res.data.error || 'Gagal memperbarui kata sandi.');
       }
     } catch {
       setStaffError('Gagal memperbarui kata sandi.');
@@ -166,7 +170,7 @@ export function OwnerOverviewTab({
     setSavingSettings(true);
     setSettingsSavedMsg('');
     try {
-      const res = await fetch('/api/ops/settings', {
+      const res = await apiFetch('/api/ops/settings', {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',

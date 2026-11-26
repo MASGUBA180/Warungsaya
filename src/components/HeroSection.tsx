@@ -1,5 +1,5 @@
 import {ArrowRight, MapPin} from 'lucide-react';
-import {STORE_HIGHLIGHTS} from '../data/storeData';
+import {STORE_HIGHLIGHTS} from '../lib/storeData';
 import type {StoreSettings} from '../types/store';
 import {ResilientImage} from './ResilientImage';
 

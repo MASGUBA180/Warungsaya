@@ -1,6 +1,7 @@
 import {Search, X} from 'lucide-react';
 import {FormEvent, useEffect, useState} from 'react';
-import {formatRupiah, formatShortDate, ORDER_STATUS_LABELS} from '../data/storeData';
+import {apiFetch} from '../lib/apiClient';
+import {formatRupiah, formatShortDate, ORDER_STATUS_LABELS} from '../lib/storeData';
 import type {OrderStatus} from '../types/store';
 
 interface TrackedOrder {
@@ -65,13 +66,14 @@ export function OrderTrackModal({
         code: code.trim(),
         phone: phoneLast4.trim(),
       });
-      const res = await fetch(`/api/public/orders/track?${params.toString()}`);
-      const data = await res.json();
-      if (!res.ok) {
-        setError(data.error || 'Pesanan tidak ditemukan.');
+      const res = await apiFetch<{order?: TrackedOrder; error?: string}>(
+        `/api/public/orders/track?${params.toString()}`
+      );
+      if (!res.ok || !res.data.order) {
+        setError(res.data.error || 'Pesanan tidak ditemukan.');
         return;
       }
-      setResult(data.order);
+      setResult(res.data.order);
     } catch {
       setError('Gagal menghubungi server toko. Coba beberapa saat lagi.');
     } finally {

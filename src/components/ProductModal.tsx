@@ -1,6 +1,6 @@
 import {Minus, Plus, X} from 'lucide-react';
 import {useEffect, useState} from 'react';
-import {formatRupiah} from '../data/storeData';
+import {formatRupiah} from '../lib/storeData';
 import type {Product, ProductVariant} from '../types/store';
 import {ResilientImage} from './ResilientImage';
 

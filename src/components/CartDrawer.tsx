@@ -1,6 +1,7 @@
 import {Check, Copy, Minus, Plus, ShoppingBag, Trash2, X} from 'lucide-react';
 import {FormEvent, useEffect, useState} from 'react';
-import {formatRupiah} from '../data/storeData';
+import {apiFetch} from '../lib/apiClient';
+import {formatRupiah} from '../lib/storeData';
 import type {Product, ProductVariant, StoreSettings} from '../types/store';
 
 export interface CartItem {
@@ -88,30 +89,32 @@ export function CartDrawer({
     setFormError('');
     setSubmitting(true);
     try {
-      const res = await fetch('/api/public/orders', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          customerName: customerName.trim(),
-          phone: phone.trim(),
-          deliveryMethod,
-          addressNote: addressNote.trim(),
-          notes: notes.trim(),
-          items: items.map((item) => ({
-            productId: item.product.id,
-            variantId: item.variant.id,
-            quantity: item.quantity,
-          })),
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setFormError(data.error || 'Gagal mengirim pesanan.');
+      const res = await apiFetch<{order?: OrderReceipt; error?: string}>(
+        '/api/public/orders',
+        {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            customerName: customerName.trim(),
+            phone: phone.trim(),
+            deliveryMethod,
+            addressNote: addressNote.trim(),
+            notes: notes.trim(),
+            items: items.map((item) => ({
+              productId: item.product.id,
+              variantId: item.variant.id,
+              quantity: item.quantity,
+            })),
+          }),
+        }
+      );
+      if (!res.ok || !res.data.order) {
+        setFormError(res.data.error || 'Gagal mengirim pesanan.');
         return;
       }
 
-      setReceipt(data.order);
-      onOrderCreated(data.order.orderNumber);
+      setReceipt(res.data.order);
+      onOrderCreated(res.data.order.orderNumber);
     } catch {
       setFormError('Gagal terhubung ke server Toko Dimas Jaya.');
     } finally {

@@ -1,5 +1,6 @@
 import {MapPin, Phone, Truck} from 'lucide-react';
-import {formatRupiah, formatShortDate, ORDER_STATUS_LABELS} from '../../data/storeData';
+import {apiFetch} from '../../lib/apiClient';
+import {formatRupiah, formatShortDate, ORDER_STATUS_LABELS} from '../../lib/storeData';
 import type {Order, OrderStatus} from '../../types/store';
 
 interface CourierTabProps {
@@ -17,7 +18,7 @@ export function CourierTab({orders, authToken, onRefresh}: CourierTabProps) {
 
   const updateDeliveryStatus = async (orderId: string, status: OrderStatus) => {
     try {
-      const res = await fetch(`/api/ops/orders/${orderId}/status`, {
+      const res = await apiFetch(`/api/ops/orders/${orderId}/status`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',

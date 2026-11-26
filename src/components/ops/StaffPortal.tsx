@@ -1,6 +1,7 @@
 import {ArrowLeft, Eye, EyeOff, LogOut, RefreshCw} from 'lucide-react';
 import {FormEvent, useCallback, useEffect, useState} from 'react';
-import {ROLE_LABELS} from '../../data/storeData';
+import {apiFetch} from '../../lib/apiClient';
+import {ROLE_LABELS} from '../../lib/storeData';
 import type {
   AuthUser,
   DivisionRole,
@@ -77,14 +78,15 @@ export function StaffPortal({
   const [settings, setSettings] = useState<StoreSettings | null>(null);
 
   useEffect(() => {
-    fetch('/api/auth/status')
-      .then((r) => {
-        if (!r.ok) throw new Error('Status unavailable');
-        return r.json();
-      })
-      .then((data) => {
-        setAuthStatus(data);
-        setAuthTab(data.ownerClaimed ? 'login' : 'claim');
+    apiFetch<{ownerClaimed: boolean; envPasscodeActive: boolean}>('/api/auth/status')
+      .then((res) => {
+        if (!res.ok) {
+          setAuthStatus({ownerClaimed: false, envPasscodeActive: false});
+          setAuthTab('claim');
+          return;
+        }
+        setAuthStatus(res.data);
+        setAuthTab(res.data.ownerClaimed ? 'login' : 'claim');
       })
       .catch(() => {
         setAuthStatus({ownerClaimed: false, envPasscodeActive: false});
@@ -96,7 +98,17 @@ export function StaffPortal({
     async (token: string) => {
       setOpsLoading(true);
       try {
-        const res = await fetch('/api/ops/bootstrap', {
+        const res = await apiFetch<{
+          user: AuthUser;
+          overview: OverviewMetrics;
+          products?: Product[];
+          orders?: Order[];
+          stockMovements?: StockMovement[];
+          ledger?: LedgerEntry[];
+          kasbon?: KasbonRecord[];
+          staff?: PublicStaffProfile[];
+          settings?: StoreSettings | null;
+        }>('/api/ops/bootstrap', {
           headers: {Authorization: `Bearer ${token}`},
         });
         if (!res.ok) {
@@ -106,7 +118,7 @@ export function StaffPortal({
           }
           return;
         }
-        const data = await res.json();
+        const data = res.data;
         setUser(data.user);
         setOverview(data.overview);
         setProducts(data.products || []);
@@ -139,24 +151,26 @@ export function StaffPortal({
         .toLowerCase()
         .replace(/[^a-z0-9._-]/g, '');
 
-      const res = await fetch('/api/auth/bootstrap-owner', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          displayName: claimName.trim(),
-          username: cleanId,
-          passcode: claimPasscode,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setAuthError(data.error || 'Gagal membuat akun pemilik.');
+      const res = await apiFetch<{token?: string; user?: AuthUser; error?: string}>(
+        '/api/auth/bootstrap-owner',
+        {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            displayName: claimName.trim(),
+            username: cleanId,
+            passcode: claimPasscode,
+          }),
+        }
+      );
+      if (!res.ok || !res.data.token || !res.data.user) {
+        setAuthError(res.data.error || 'Gagal membuat akun pemilik.');
         return;
       }
-      setAuthToken(data.token);
-      setUser(data.user);
-      setActiveTab(pickDefaultTabForRole(data.user.role));
-      await loadOperationalData(data.token);
+      setAuthToken(res.data.token);
+      setUser(res.data.user);
+      setActiveTab(pickDefaultTabForRole(res.data.user.role));
+      await loadOperationalData(res.data.token);
     } catch {
       setAuthError('Gagal menghubungi server Toko Dimas Jaya.');
     } finally {
@@ -169,24 +183,26 @@ export function StaffPortal({
     setAuthError('');
     setAuthLoading(true);
     try {
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          username: loginUsername.trim().toLowerCase(),
-          passcode: loginPasscode,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setAuthError(data.error || 'ID/username atau kata sandi salah.');
+      const res = await apiFetch<{token?: string; user?: AuthUser; error?: string}>(
+        '/api/auth/login',
+        {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            username: loginUsername.trim().toLowerCase(),
+            passcode: loginPasscode,
+          }),
+        }
+      );
+      if (!res.ok || !res.data.token || !res.data.user) {
+        setAuthError(res.data.error || 'ID/username atau kata sandi salah.');
         return;
       }
-      setAuthToken(data.token);
-      setUser(data.user);
+      setAuthToken(res.data.token);
+      setUser(res.data.user);
       setLoginPasscode('');
-      setActiveTab(pickDefaultTabForRole(data.user.role));
-      await loadOperationalData(data.token);
+      setActiveTab(pickDefaultTabForRole(res.data.user.role));
+      await loadOperationalData(res.data.token);
     } catch {
       setAuthError('Gagal menghubungi server Toko Dimas Jaya.');
     } finally {

@@ -1,6 +1,7 @@
 import {Plus} from 'lucide-react';
 import {FormEvent, useState} from 'react';
-import {formatRupiah, formatShortDate, STORE_CATEGORIES} from '../../data/storeData';
+import {formatRupiah, formatShortDate, STORE_CATEGORIES} from '../../lib/storeData';
+import {apiFetch} from '../../lib/apiClient';
 import type {Product, ProductCategory, StockMovement} from '../../types/store';
 
 interface WarehouseTabProps {
@@ -61,7 +62,7 @@ export function WarehouseTab({
     setProdError('');
     setSavingProd(true);
     try {
-      const res = await fetch('/api/ops/products', {
+      const res = await apiFetch<{product?: Product; error?: string}>('/api/ops/products', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -77,9 +78,8 @@ export function WarehouseTab({
           description: newDesc.trim(),
         }),
       });
-      const data = await res.json();
       if (!res.ok) {
-        setProdError(data.error || 'Gagal menambah produk.');
+        setProdError(res.data.error || 'Gagal menambah produk.');
         return;
       }
       setNewName('');
@@ -102,7 +102,7 @@ export function WarehouseTab({
     if (!stockTarget) return;
     setSavingStock(true);
     try {
-      const res = await fetch('/api/ops/stock', {
+      const res = await apiFetch('/api/ops/stock', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

@@ -12,7 +12,8 @@ import {ProductModal} from './components/ProductModal';
 import {
   DEFAULT_STORE_SETTINGS,
   INITIAL_PUBLIC_PRODUCTS,
-} from './data/storeData';
+} from './lib/storeData';
+import {apiFetch} from './lib/apiClient';
 import type {
   Product,
   ProductCategory,
@@ -38,12 +39,12 @@ export default function App() {
 
   const fetchStoreCatalog = useCallback(async () => {
     try {
-      const res = await fetch('/api/public/store');
-      const contentType = res.headers.get('content-type') || '';
-      if (!res.ok || !contentType.includes('application/json')) return;
-      const data = await res.json();
-      if (data.settings) setSettings(data.settings);
-      if (Array.isArray(data.products)) setProducts(data.products);
+      const res = await apiFetch<{settings?: StoreSettings; products?: Product[]}>(
+        '/api/public/store'
+      );
+      if (!res.ok) return;
+      if (res.data.settings) setSettings(res.data.settings);
+      if (Array.isArray(res.data.products)) setProducts(res.data.products);
     } catch {
       // keep existing state on transient error
     } finally {

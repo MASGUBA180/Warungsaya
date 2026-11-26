@@ -1,6 +1,7 @@
 import {Minus, Plus, Trash2} from 'lucide-react';
 import {FormEvent, useState} from 'react';
-import {formatRupiah, formatShortDate, ORDER_STATUS_LABELS} from '../../data/storeData';
+import {formatRupiah, formatShortDate, ORDER_STATUS_LABELS} from '../../lib/storeData';
+import {apiFetch} from '../../lib/apiClient';
 import type {Order, OrderStatus, PaymentMethod, Product, ProductVariant} from '../../types/store';
 
 interface PosBasketItem {
@@ -83,7 +84,7 @@ export function CashierPosTab({
     setPosSuccess('');
     setSubmitting(true);
     try {
-      const res = await fetch('/api/ops/pos', {
+      const res = await apiFetch<{order?: Order; error?: string}>('/api/ops/pos', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -101,14 +102,13 @@ export function CashierPosTab({
           })),
         }),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        setPosError(data.error || 'Gagal mencatat transaksi kasir.');
+      if (!res.ok || !res.data.order) {
+        setPosError(res.data.error || 'Gagal mencatat transaksi kasir.');
         return;
       }
 
       setPosSuccess(
-        `Transaksi #${data.order.orderNumber} (${formatRupiah(data.order.total)}) tercatat.`
+        `Transaksi #${res.data.order.orderNumber} (${formatRupiah(res.data.order.total)}) tercatat.`
       );
       setBasket([]);
       setCustomerName('Pembeli Toko');
@@ -125,7 +125,7 @@ export function CashierPosTab({
 
   const handleUpdateOrderStatus = async (orderId: string, status: OrderStatus) => {
     try {
-      const res = await fetch(`/api/ops/orders/${orderId}/status`, {
+      const res = await apiFetch(`/api/ops/orders/${orderId}/status`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
