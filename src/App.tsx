@@ -9,7 +9,10 @@ import {StaffPortal} from './components/ops/StaffPortal';
 import {OrderTrackModal} from './components/OrderTrackModal';
 import {ProductCatalog} from './components/ProductCatalog';
 import {ProductModal} from './components/ProductModal';
-import {DEFAULT_STORE_SETTINGS} from './data/storeData';
+import {
+  DEFAULT_STORE_SETTINGS,
+  INITIAL_PUBLIC_PRODUCTS,
+} from './data/storeData';
 import type {
   Product,
   ProductCategory,
@@ -20,8 +23,8 @@ import type {
 export default function App() {
   const [viewMode, setViewMode] = useState<'storefront' | 'portal'>('storefront');
   const [settings, setSettings] = useState<StoreSettings>(DEFAULT_STORE_SETTINGS);
-  const [products, setProducts] = useState<Product[]>([]);
-  const [catalogLoading, setCatalogLoading] = useState(true);
+  const [products, setProducts] = useState<Product[]>(INITIAL_PUBLIC_PRODUCTS);
+  const [catalogLoading, setCatalogLoading] = useState(false);
 
   const [selectedCategory, setSelectedCategory] = useState<ProductCategory>('Semua');
   const [searchQuery, setSearchQuery] = useState('');
@@ -36,7 +39,8 @@ export default function App() {
   const fetchStoreCatalog = useCallback(async () => {
     try {
       const res = await fetch('/api/public/store');
-      if (!res.ok) return;
+      const contentType = res.headers.get('content-type') || '';
+      if (!res.ok || !contentType.includes('application/json')) return;
       const data = await res.json();
       if (data.settings) setSettings(data.settings);
       if (Array.isArray(data.products)) setProducts(data.products);
