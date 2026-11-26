@@ -124,7 +124,14 @@ export default function App() {
       />
 
       <main className="flex-1">
-        <HeroSection settings={settings} />
+        <HeroSection
+          settings={settings}
+          onOpenTracker={() => {
+            setTrackerInitialCode('');
+            setIsTrackerOpen(true);
+          }}
+          onOpenPortal={() => setViewMode('portal')}
+        />
 
         <ProductCatalog
           products={products}

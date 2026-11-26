@@ -5,9 +5,15 @@ import {ResilientImage} from './ResilientImage';
 
 interface HeroSectionProps {
   settings: StoreSettings;
+  onOpenTracker: () => void;
+  onOpenPortal: () => void;
 }
 
-export function HeroSection({settings}: HeroSectionProps) {
+export function HeroSection({
+  settings,
+  onOpenTracker,
+  onOpenPortal,
+}: HeroSectionProps) {
   return (
     <section id="beranda" className="bg-white border-b border-zinc-200">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 pt-10 pb-12 lg:pt-14 lg:pb-16">
@@ -33,22 +39,42 @@ export function HeroSection({settings}: HeroSectionProps) {
               </p>
             </div>
 
-            <div className="mt-8 flex flex-wrap items-center gap-4">
-              <a
-                href="#katalog"
-                className="inline-flex items-center gap-2 px-5 py-3 min-h-[44px] rounded-lg bg-[#14532D] text-white text-sm font-semibold hover:bg-[#166534] transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-[#14532D]"
-              >
-                <span>Lihat Katalog Produk</span>
-                <ArrowRight className="w-4 h-4 shrink-0" aria-hidden="true" />
-              </a>
+            <div className="mt-8 space-y-4">
+              <div className="flex flex-wrap items-center gap-4">
+                <a
+                  href="#katalog"
+                  className="inline-flex items-center gap-2 px-5 py-3 min-h-[44px] rounded-lg bg-[#14532D] text-white text-sm font-semibold hover:bg-[#166534] transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-[#14532D]"
+                >
+                  <span>Lihat Katalog Produk</span>
+                  <ArrowRight className="w-4 h-4 shrink-0" aria-hidden="true" />
+                </a>
 
-              <a
-                href="#lokasi"
-                className="inline-flex items-center gap-2 px-4 py-3 min-h-[44px] rounded-lg border border-zinc-300 bg-white text-zinc-800 text-sm font-medium hover:bg-zinc-50 transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-zinc-400"
-              >
-                <MapPin className="w-4 h-4 text-[#14532D] shrink-0" aria-hidden="true" />
-                <span>Lokasi & Jam Buka</span>
-              </a>
+                <a
+                  href="#lokasi"
+                  className="inline-flex items-center gap-2 px-4 py-3 min-h-[44px] rounded-lg border border-zinc-300 bg-white text-zinc-800 text-sm font-medium hover:bg-zinc-50 transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-zinc-400"
+                >
+                  <MapPin className="w-4 h-4 text-[#14532D] shrink-0" aria-hidden="true" />
+                  <span>Lokasi & Jam Buka</span>
+                </a>
+              </div>
+
+              <div className="md:hidden flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-medium text-zinc-600 pt-1">
+                <button
+                  type="button"
+                  onClick={onOpenTracker}
+                  className="hover:text-zinc-900 underline underline-offset-4 cursor-pointer"
+                >
+                  Lacak Pesanan
+                </button>
+                <span aria-hidden="true">·</span>
+                <button
+                  type="button"
+                  onClick={onOpenPortal}
+                  className="text-[#14532D] font-semibold underline underline-offset-4 cursor-pointer"
+                >
+                  Portal Pemilik & Staf
+                </button>
+              </div>
             </div>
           </div>
 

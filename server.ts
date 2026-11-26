@@ -170,10 +170,16 @@ async function startServer() {
   const app = express();
   app.use(express.json({limit: '1mb'}));
 
+  function getConfiguredEnvOwnerPasscode(): string {
+    const raw = (process.env.OWNER_PASSCODE || '').trim();
+    if (!raw || raw.startsWith('MY_')) return '';
+    return raw;
+  }
+
   // --- AUTH ROUTES ---
   app.get('/api/auth/status', (_req, res) => {
     const db = loadDatabase();
-    const envPasscodeActive = Boolean(process.env.OWNER_PASSCODE?.trim());
+    const envPasscodeActive = Boolean(getConfiguredEnvOwnerPasscode());
     const ownerClaimed = db.staff.some((s) => s.role === 'PEMILIK' && s.active);
     res.json({
       ownerClaimed,
@@ -183,25 +189,17 @@ async function startServer() {
   });
 
   app.post('/api/auth/bootstrap-owner', (req, res) => {
-    const envPasscode = process.env.OWNER_PASSCODE?.trim();
-    if (envPasscode) {
-      res.status(400).json({
-        error: 'Kata sandi pemilik sudah diatur melalui environment server.',
-      });
-      return;
-    }
-
     const db = loadDatabase();
     const existingOwner = db.staff.some((s) => s.role === 'PEMILIK');
     if (existingOwner) {
       res.status(409).json({
-        error: 'Akun Pemilik sudah diklaim sebelumnya. Silakan login.',
+        error: 'Akun Pemilik sudah terdaftar. Silakan masuk dengan ID dan kata sandi Anda.',
       });
       return;
     }
 
     const displayName = String(req.body?.displayName || '').trim();
-    const username = String(req.body?.username || 'pemilik')
+    const username = String(req.body?.username || '')
       .trim()
       .toLowerCase()
       .replace(/[^a-z0-9._-]/g, '');
@@ -210,7 +208,7 @@ async function startServer() {
     if (displayName.length < 2 || username.length < 3 || passcode.length < 6) {
       res.status(400).json({
         error:
-          'Nama minimal 2 karakter, username minimal 3 karakter, dan kata sandi minimal 6 karakter.',
+          'Nama minimal 2 karakter, ID/username minimal 3 karakter (huruf/angka), dan kata sandi minimal 6 karakter.',
       });
       return;
     }
@@ -246,11 +244,11 @@ async function startServer() {
     const passcode = String(req.body?.passcode || '');
 
     if (!username || !passcode) {
-      res.status(400).json({error: 'Username dan kata sandi wajib diisi.'});
+      res.status(400).json({error: 'ID/username dan kata sandi wajib diisi.'});
       return;
     }
 
-    const envOwnerPasscode = process.env.OWNER_PASSCODE?.trim();
+    const envOwnerPasscode = getConfiguredEnvOwnerPasscode();
     if (
       envOwnerPasscode &&
       username === 'pemilik' &&

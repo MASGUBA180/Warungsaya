@@ -1,4 +1,4 @@
-import {ArrowLeft, LogOut, RefreshCw} from 'lucide-react';
+import {ArrowLeft, Eye, EyeOff, LogOut, RefreshCw} from 'lucide-react';
 import {FormEvent, useCallback, useEffect, useState} from 'react';
 import {ROLE_LABELS} from '../../data/storeData';
 import type {
@@ -49,13 +49,18 @@ export function StaffPortal({
     ownerClaimed: boolean;
     envPasscodeActive: boolean;
   } | null>(null);
+  const [authTab, setAuthTab] = useState<'claim' | 'login'>('claim');
 
   // Claim / Login forms
-  const [claimName, setClaimName] = useState('Pak Dimas');
-  const [claimUsername, setClaimUsername] = useState('pemilik');
+  const [claimName, setClaimName] = useState('Dimas (Pemilik)');
+  const [claimUsername, setClaimUsername] = useState('dimas');
   const [claimPasscode, setClaimPasscode] = useState('');
-  const [loginUsername, setLoginUsername] = useState('pemilik');
+  const [showClaimPass, setShowClaimPass] = useState(false);
+
+  const [loginUsername, setLoginUsername] = useState('');
   const [loginPasscode, setLoginPasscode] = useState('');
+  const [showLoginPass, setShowLoginPass] = useState(false);
+
   const [authError, setAuthError] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
 
@@ -73,11 +78,18 @@ export function StaffPortal({
 
   useEffect(() => {
     fetch('/api/auth/status')
-      .then((r) => r.json())
-      .then((data) => setAuthStatus(data))
-      .catch(() =>
-        setAuthStatus({ownerClaimed: true, envPasscodeActive: false})
-      );
+      .then((r) => {
+        if (!r.ok) throw new Error('Status unavailable');
+        return r.json();
+      })
+      .then((data) => {
+        setAuthStatus(data);
+        setAuthTab(data.ownerClaimed ? 'login' : 'claim');
+      })
+      .catch(() => {
+        setAuthStatus({ownerClaimed: false, envPasscodeActive: false});
+        setAuthTab('claim');
+      });
   }, []);
 
   const loadOperationalData = useCallback(
@@ -122,18 +134,23 @@ export function StaffPortal({
     setAuthError('');
     setAuthLoading(true);
     try {
+      const cleanId = claimUsername
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9._-]/g, '');
+
       const res = await fetch('/api/auth/bootstrap-owner', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
           displayName: claimName.trim(),
-          username: claimUsername.trim(),
+          username: cleanId,
           passcode: claimPasscode,
         }),
       });
       const data = await res.json();
       if (!res.ok) {
-        setAuthError(data.error || 'Gagal mengaktifkan akun pemilik.');
+        setAuthError(data.error || 'Gagal membuat akun pemilik.');
         return;
       }
       setAuthToken(data.token);
@@ -156,13 +173,13 @@ export function StaffPortal({
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
-          username: loginUsername.trim(),
+          username: loginUsername.trim().toLowerCase(),
           passcode: loginPasscode,
         }),
       });
       const data = await res.json();
       if (!res.ok) {
-        setAuthError(data.error || 'Username atau kata sandi salah.');
+        setAuthError(data.error || 'ID/username atau kata sandi salah.');
         return;
       }
       setAuthToken(data.token);
@@ -181,12 +198,12 @@ export function StaffPortal({
     setAuthToken(null);
     setUser(null);
     setOverview(null);
+    setAuthTab(authStatus?.ownerClaimed ? 'login' : 'claim');
   };
 
-  // Unauthenticated view: First-run owner claim OR standard login
+  // Unauthenticated view: Wait for authStatus, then show Buat ID & Sandi Pemilik or Login
   if (!authToken || !user) {
-    const needsFirstRunClaim =
-      authStatus && !authStatus.ownerClaimed && !authStatus.envPasscodeActive;
+    const canClaimOwner = authStatus ? !authStatus.ownerClaimed : false;
 
     return (
       <div className="min-h-screen bg-[#FAFAFA] flex flex-col justify-between p-4 sm:p-6">
@@ -206,123 +223,201 @@ export function StaffPortal({
                 Toko Dimas Jaya · Gang Makam, Gunung Batin Udik
               </p>
               <h1 className="font-display text-2xl font-bold text-zinc-900 mt-1">
-                {needsFirstRunClaim
-                  ? 'Aktivasi Akun Pemilik Pertama Kali'
-                  : 'Masuk Portal Staf & Pemilik'}
+                Portal Pemilik & Divisi Toko
               </h1>
               <p className="text-sm text-zinc-600 mt-1.5 leading-relaxed">
-                {needsFirstRunClaim
-                  ? 'Buat akun Pemilik untuk mengelola kasir, stok gudang, pengantaran kurir, keuangan, serta membuat akses staf divisi.'
-                  : 'Masuk menggunakan username dan kata sandi divisi (Pemilik, Kasir, Gudang, Kurir, atau Keuangan).'}
+                {canClaimOwner && authTab === 'claim'
+                  ? 'Buat ID dan kata sandi Pemilik Anda sekarang untuk masuk dan mengatur seluruh divisi toko.'
+                  : 'Masuk menggunakan ID/username dan kata sandi akun Pemilik atau staf divisi.'}
               </p>
             </div>
 
-            {needsFirstRunClaim ? (
-              <form onSubmit={handleBootstrapOwner} className="space-y-4">
-                <div>
-                  <label htmlFor="claim-name" className="block text-xs text-zinc-600 mb-1">
-                    Nama Pemilik
-                  </label>
-                  <input
-                    id="claim-name"
-                    type="text"
-                    required
-                    value={claimName}
-                    onChange={(e) => setClaimName(e.target.value)}
-                    className="w-full px-3 py-2.5 min-h-[42px] text-sm border border-zinc-300 rounded-lg focus:outline-none focus:border-[#14532D]"
-                  />
-                </div>
-
-                <div>
-                  <label htmlFor="claim-username" className="block text-xs text-zinc-600 mb-1">
-                    Username Pemilik
-                  </label>
-                  <input
-                    id="claim-username"
-                    type="text"
-                    required
-                    value={claimUsername}
-                    onChange={(e) => setClaimUsername(e.target.value)}
-                    className="w-full px-3 py-2.5 min-h-[42px] text-sm font-mono border border-zinc-300 rounded-lg focus:outline-none focus:border-[#14532D]"
-                  />
-                </div>
-
-                <div>
-                  <label htmlFor="claim-pass" className="block text-xs text-zinc-600 mb-1">
-                    Buat Kata Sandi (Minimal 6 karakter)
-                  </label>
-                  <input
-                    id="claim-pass"
-                    type="password"
-                    required
-                    minLength={6}
-                    value={claimPasscode}
-                    onChange={(e) => setClaimPasscode(e.target.value)}
-                    placeholder="Masukkan kata sandi baru"
-                    className="w-full px-3 py-2.5 min-h-[42px] text-sm border border-zinc-300 rounded-lg focus:outline-none focus:border-[#14532D]"
-                  />
-                </div>
-
-                {authError && (
-                  <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">
-                    {authError}
-                  </p>
-                )}
-
-                <button
-                  type="submit"
-                  disabled={authLoading}
-                  className="w-full py-3 px-4 min-h-[44px] rounded-lg bg-[#14532D] text-white text-sm font-semibold hover:bg-[#166534] disabled:opacity-60 cursor-pointer"
-                >
-                  {authLoading ? 'Mengaktifkan...' : 'Aktifkan Akun Pemilik'}
-                </button>
-              </form>
+            {!authStatus ? (
+              <div className="space-y-3 animate-pulse py-4">
+                <div className="h-10 bg-zinc-100 rounded-lg" />
+                <div className="h-10 bg-zinc-100 rounded-lg" />
+                <div className="h-11 bg-zinc-200 rounded-lg" />
+              </div>
             ) : (
-              <form onSubmit={handleLogin} className="space-y-4">
-                <div>
-                  <label htmlFor="login-user" className="block text-xs text-zinc-600 mb-1">
-                    Username Staf / Pemilik
-                  </label>
-                  <input
-                    id="login-user"
-                    type="text"
-                    required
-                    value={loginUsername}
-                    onChange={(e) => setLoginUsername(e.target.value)}
-                    placeholder="pemilik"
-                    className="w-full px-3 py-2.5 min-h-[42px] text-sm font-mono border border-zinc-300 rounded-lg focus:outline-none focus:border-[#14532D]"
-                  />
-                </div>
-
-                <div>
-                  <label htmlFor="login-pass" className="block text-xs text-zinc-600 mb-1">
-                    Kata Sandi
-                  </label>
-                  <input
-                    id="login-pass"
-                    type="password"
-                    required
-                    value={loginPasscode}
-                    onChange={(e) => setLoginPasscode(e.target.value)}
-                    placeholder="Masukkan kata sandi"
-                    className="w-full px-3 py-2.5 min-h-[42px] text-sm border border-zinc-300 rounded-lg focus:outline-none focus:border-[#14532D]"
-                  />
-                </div>
-
-                {authError && (
-                  <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">
-                    {authError}
-                  </p>
+              <>
+                {canClaimOwner && (
+                  <div className="grid grid-cols-2 gap-1 p-1 bg-zinc-100 rounded-lg">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAuthTab('claim');
+                        setAuthError('');
+                      }}
+                      className={`py-2 px-3 rounded-md text-xs font-semibold transition-colors cursor-pointer ${
+                        authTab === 'claim'
+                          ? 'bg-white text-zinc-900 shadow-sm'
+                          : 'text-zinc-600 hover:text-zinc-900'
+                      }`}
+                    >
+                      Buat ID & Sandi Pemilik
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAuthTab('login');
+                        setAuthError('');
+                      }}
+                      className={`py-2 px-3 rounded-md text-xs font-semibold transition-colors cursor-pointer ${
+                        authTab === 'login'
+                          ? 'bg-white text-zinc-900 shadow-sm'
+                          : 'text-zinc-600 hover:text-zinc-900'
+                      }`}
+                    >
+                      Sudah Punya Akun
+                    </button>
+                  </div>
                 )}
 
-                <button
-                  type="submit"
-                  disabled={authLoading}
-                  className="w-full py-3 px-4 min-h-[44px] rounded-lg bg-[#14532D] text-white text-sm font-semibold hover:bg-[#166534] disabled:opacity-60 cursor-pointer"
-                >
-                  {authLoading ? 'Memeriksa...' : 'Masuk ke Ruang Operasional'}
-                </button>
-              </form>
+                {canClaimOwner && authTab === 'claim' ? (
+                  <form onSubmit={handleBootstrapOwner} className="space-y-4">
+                    <div>
+                      <label htmlFor="claim-name" className="block text-xs text-zinc-600 mb-1">
+                        Nama Pemilik
+                      </label>
+                      <input
+                        id="claim-name"
+                        type="text"
+                        required
+                        value={claimName}
+                        onChange={(e) => setClaimName(e.target.value)}
+                        placeholder="Contoh: Dimas Jaya"
+                        className="w-full px-3 py-2.5 min-h-[42px] text-sm border border-zinc-300 rounded-lg focus:outline-none focus:border-[#14532D]"
+                      />
+                    </div>
+
+                    <div>
+                      <label htmlFor="claim-username" className="block text-xs text-zinc-600 mb-1">
+                        Buat ID / Username Pemilik
+                      </label>
+                      <input
+                        id="claim-username"
+                        type="text"
+                        required
+                        minLength={3}
+                        value={claimUsername}
+                        onChange={(e) => setClaimUsername(e.target.value)}
+                        placeholder="Contoh: dimas atau pemilik"
+                        className="w-full px-3 py-2.5 min-h-[42px] text-sm font-mono border border-zinc-300 rounded-lg focus:outline-none focus:border-[#14532D]"
+                      />
+                      <p className="text-[11px] text-zinc-500 mt-1">
+                        Minimal 3 karakter (huruf kecil, angka, titik, atau garis bawah tanpa spasi).
+                      </p>
+                    </div>
+
+                    <div>
+                      <label htmlFor="claim-pass" className="block text-xs text-zinc-600 mb-1">
+                        Buat Kata Sandi Pemilik (Minimal 6 karakter)
+                      </label>
+                      <div className="relative">
+                        <input
+                          id="claim-pass"
+                          type={showClaimPass ? 'text' : 'password'}
+                          required
+                          minLength={6}
+                          value={claimPasscode}
+                          onChange={(e) => setClaimPasscode(e.target.value)}
+                          placeholder="Ketik kata sandi baru Anda"
+                          className="w-full px-3 pr-10 py-2.5 min-h-[42px] text-sm border border-zinc-300 rounded-lg focus:outline-none focus:border-[#14532D]"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowClaimPass((v) => !v)}
+                          aria-label={showClaimPass ? 'Sembunyikan sandi' : 'Lihat sandi'}
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1.5 text-zinc-500 hover:text-zinc-800 cursor-pointer"
+                        >
+                          {showClaimPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                      </div>
+                    </div>
+
+                    {authError && (
+                      <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">
+                        {authError}
+                      </p>
+                    )}
+
+                    <button
+                      type="submit"
+                      disabled={authLoading}
+                      className="w-full py-3 px-4 min-h-[44px] rounded-lg bg-[#14532D] text-white text-sm font-semibold hover:bg-[#166534] disabled:opacity-60 cursor-pointer"
+                    >
+                      {authLoading ? 'Menyimpan...' : 'Buat Akun Pemilik & Masuk'}
+                    </button>
+                  </form>
+                ) : (
+                  <form onSubmit={handleLogin} className="space-y-4">
+                    <div>
+                      <label htmlFor="login-user" className="block text-xs text-zinc-600 mb-1">
+                        ID / Username Pemilik atau Staf
+                      </label>
+                      <input
+                        id="login-user"
+                        type="text"
+                        required
+                        value={loginUsername}
+                        onChange={(e) => setLoginUsername(e.target.value)}
+                        placeholder="Masukkan ID / username Anda"
+                        className="w-full px-3 py-2.5 min-h-[42px] text-sm font-mono border border-zinc-300 rounded-lg focus:outline-none focus:border-[#14532D]"
+                      />
+                    </div>
+
+                    <div>
+                      <label htmlFor="login-pass" className="block text-xs text-zinc-600 mb-1">
+                        Kata Sandi
+                      </label>
+                      <div className="relative">
+                        <input
+                          id="login-pass"
+                          type={showLoginPass ? 'text' : 'password'}
+                          required
+                          value={loginPasscode}
+                          onChange={(e) => setLoginPasscode(e.target.value)}
+                          placeholder="Masukkan kata sandi"
+                          className="w-full px-3 pr-10 py-2.5 min-h-[42px] text-sm border border-zinc-300 rounded-lg focus:outline-none focus:border-[#14532D]"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowLoginPass((v) => !v)}
+                          aria-label={showLoginPass ? 'Sembunyikan sandi' : 'Lihat sandi'}
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1.5 text-zinc-500 hover:text-zinc-800 cursor-pointer"
+                        >
+                          {showLoginPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                      </div>
+                    </div>
+
+                    {authError && (
+                      <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">
+                        {authError}
+                      </p>
+                    )}
+
+                    <button
+                      type="submit"
+                      disabled={authLoading}
+                      className="w-full py-3 px-4 min-h-[44px] rounded-lg bg-[#14532D] text-white text-sm font-semibold hover:bg-[#166534] disabled:opacity-60 cursor-pointer"
+                    >
+                      {authLoading ? 'Memeriksa...' : 'Masuk ke Ruang Operasional'}
+                    </button>
+
+                    {!canClaimOwner && (
+                      <p className="text-xs text-zinc-500 leading-relaxed pt-1">
+                        Lupa ID atau sandi staf? Minta Pemilik mereset lewat menu{' '}
+                        <span className="font-medium text-zinc-700">Staf & Pengaturan</span>.
+                        Pemilik juga dapat login darurat memakai username{' '}
+                        <span className="font-mono text-zinc-700">pemilik</span> dengan variabel{' '}
+                        <span className="font-mono text-zinc-700">OWNER_PASSCODE</span> di panel
+                        Secrets.
+                      </p>
+                    )}
+                  </form>
+                )}
+              </>
             )}
           </div>
         </div>

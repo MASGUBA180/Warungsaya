@@ -1,3 +1,4 @@
+import {Eye, EyeOff} from 'lucide-react';
 import {useState, type FormEvent} from 'react';
 import {
   formatRupiah,
@@ -52,9 +53,12 @@ export function OwnerOverviewTab({
   const [username, setUsername] = useState('');
   const [role, setRole] = useState<DivisionRole>('KASIR');
   const [passcode, setPasscode] = useState('');
+  const [showNewPass, setShowNewPass] = useState(false);
   const [staffError, setStaffError] = useState('');
   const [staffSuccess, setStaffSuccess] = useState('');
   const [savingStaff, setSavingStaff] = useState(false);
+  const [resetTargetId, setResetTargetId] = useState<string | null>(null);
+  const [resetPassValue, setResetPassValue] = useState('');
 
   // Settings form state
   const [hours, setHours] = useState(settings.hours);
@@ -127,6 +131,33 @@ export function OwnerOverviewTab({
       }
     } catch {
       // ignore transient
+    }
+  };
+
+  const handleResetStaffPasscode = async (member: PublicStaffProfile) => {
+    if (resetPassValue.length < 6) {
+      setStaffError('Kata sandi baru minimal 6 karakter.');
+      return;
+    }
+    setStaffError('');
+    setStaffSuccess('');
+    try {
+      const res = await fetch(`/api/ops/staff/${member.id}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({passcode: resetPassValue}),
+      });
+      if (res.ok) {
+        setStaffSuccess(`Kata sandi untuk ${member.displayName} (${member.username}) diperbarui.`);
+        setResetTargetId(null);
+        setResetPassValue('');
+        await onRefresh();
+      }
+    } catch {
+      setStaffError('Gagal memperbarui kata sandi.');
     }
   };
 
@@ -228,16 +259,26 @@ export function OwnerOverviewTab({
               <label htmlFor="staff-passcode" className="block text-xs text-zinc-600 mb-1">
                 Kata Sandi (Minimal 6 karakter)
               </label>
-              <input
-                id="staff-passcode"
-                type="password"
-                required
-                minLength={6}
-                value={passcode}
-                onChange={(e) => setPasscode(e.target.value)}
-                placeholder="Minimal 6 karakter"
-                className="w-full px-3 py-2 min-h-[40px] text-sm border border-zinc-300 rounded-lg focus:outline-none focus:border-[#14532D]"
-              />
+              <div className="relative">
+                <input
+                  id="staff-passcode"
+                  type={showNewPass ? 'text' : 'password'}
+                  required
+                  minLength={6}
+                  value={passcode}
+                  onChange={(e) => setPasscode(e.target.value)}
+                  placeholder="Minimal 6 karakter"
+                  className="w-full px-3 pr-10 py-2 min-h-[40px] text-sm border border-zinc-300 rounded-lg focus:outline-none focus:border-[#14532D]"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowNewPass((v) => !v)}
+                  aria-label={showNewPass ? 'Sembunyikan sandi' : 'Lihat sandi'}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-zinc-500 hover:text-zinc-800 cursor-pointer"
+                >
+                  {showNewPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
             </div>
 
             {staffError && (
@@ -300,13 +341,55 @@ export function OwnerOverviewTab({
                         </span>
                       </td>
                       <td className="py-3 px-4 text-right">
-                        <button
-                          type="button"
-                          onClick={() => handleToggleStaffActive(member)}
-                          className="text-xs font-medium text-zinc-700 hover:text-zinc-900 underline underline-offset-2 cursor-pointer"
-                        >
-                          {member.active ? 'Nonaktifkan' : 'Aktifkan'}
-                        </button>
+                        {resetTargetId === member.id ? (
+                          <div className="inline-flex items-center justify-end gap-1.5">
+                            <input
+                              type="text"
+                              minLength={6}
+                              value={resetPassValue}
+                              onChange={(e) => setResetPassValue(e.target.value)}
+                              placeholder="Sandi baru (min 6)"
+                              className="w-32 px-2 py-1 text-xs border border-zinc-300 rounded"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => handleResetStaffPasscode(member)}
+                              className="px-2 py-1 rounded bg-[#14532D] text-white text-xs font-medium cursor-pointer"
+                            >
+                              Simpan
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setResetTargetId(null);
+                                setResetPassValue('');
+                              }}
+                              className="px-1.5 py-1 text-xs text-zinc-500 cursor-pointer"
+                            >
+                              Batal
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="inline-flex items-center gap-3">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setResetTargetId(member.id);
+                                setResetPassValue('');
+                              }}
+                              className="text-xs font-medium text-[#14532D] hover:underline underline-offset-2 cursor-pointer whitespace-nowrap"
+                            >
+                              Ubah Sandi
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleToggleStaffActive(member)}
+                              className="text-xs font-medium text-zinc-700 hover:text-zinc-900 underline underline-offset-2 cursor-pointer whitespace-nowrap"
+                            >
+                              {member.active ? 'Nonaktifkan' : 'Aktifkan'}
+                            </button>
+                          </div>
+                        )}
                       </td>
                     </tr>
                   ))}
