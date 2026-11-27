@@ -29,6 +29,7 @@ export function FinanceTab({
   const [payAmount, setPayAmount] = useState('');
 
   const canWriteLedger = role === 'PEMILIK' || role === 'KEUANGAN';
+  const isCashierKasbonMode = role === 'KASIR';
 
   const totalMasuk = ledger
     .filter((l) => l.type === 'MASUK')
@@ -92,26 +93,33 @@ export function FinanceTab({
 
   return (
     <div className="space-y-8">
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <div className="bg-white border border-zinc-200 rounded-xl p-5">
-          <p className="text-xs text-zinc-500">Total Pemasukan Tercatat</p>
-          <p className="text-xl font-bold text-[#14532D] tabular-price mt-1">
-            {formatRupiah(totalMasuk)}
-          </p>
+      {isCashierKasbonMode ? (
+        <div className="bg-zinc-100 border border-zinc-200 rounded-xl px-5 py-3.5 text-xs text-zinc-700">
+          Mode Meja Kasir: khusus pengecekan dan pencatatan cicilan kasbon pelanggan. Buku kas
+          harian dikelola Divisi Keuangan &amp; Pemilik.
         </div>
-        <div className="bg-white border border-zinc-200 rounded-xl p-5">
-          <p className="text-xs text-zinc-500">Total Pengeluaran Tercatat</p>
-          <p className="text-xl font-bold text-zinc-900 tabular-price mt-1">
-            {formatRupiah(totalKeluar)}
-          </p>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="bg-white border border-zinc-200 rounded-xl p-5">
+            <p className="text-xs text-zinc-500">Total Pemasukan Tercatat</p>
+            <p className="text-xl font-bold text-[#14532D] tabular-price mt-1">
+              {formatRupiah(totalMasuk)}
+            </p>
+          </div>
+          <div className="bg-white border border-zinc-200 rounded-xl p-5">
+            <p className="text-xs text-zinc-500">Total Pengeluaran Tercatat</p>
+            <p className="text-xl font-bold text-zinc-900 tabular-price mt-1">
+              {formatRupiah(totalKeluar)}
+            </p>
+          </div>
+          <div className="bg-white border border-zinc-200 rounded-xl p-5">
+            <p className="text-xs text-zinc-500">Selisih Arus Kas</p>
+            <p className="text-xl font-bold text-zinc-900 tabular-price mt-1">
+              {formatRupiah(totalMasuk - totalKeluar)}
+            </p>
+          </div>
         </div>
-        <div className="bg-white border border-zinc-200 rounded-xl p-5">
-          <p className="text-xs text-zinc-500">Selisih Arus Kas</p>
-          <p className="text-xl font-bold text-zinc-900 tabular-price mt-1">
-            {formatRupiah(totalMasuk - totalKeluar)}
-          </p>
-        </div>
-      </div>
+      )}
 
       {canWriteLedger && (
         <form
@@ -310,45 +318,47 @@ export function FinanceTab({
       </div>
 
       {/* Ledger Table */}
-      <div className="bg-white border border-zinc-200 rounded-xl overflow-hidden">
-        <div className="px-6 py-4 border-b border-zinc-200">
-          <h3 className="text-base font-semibold text-zinc-900">Buku Kas Harian</h3>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse text-sm">
-            <thead>
-              <tr className="border-b border-zinc-200 bg-zinc-50 text-xs text-zinc-500">
-                <th className="py-3 px-4 font-medium">Waktu</th>
-                <th className="py-3 px-4 font-medium">Kategori & Keterangan</th>
-                <th className="py-3 px-4 font-medium">Petugas</th>
-                <th className="py-3 px-4 font-medium text-right">Nominal</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-zinc-100 text-xs">
-              {ledger.map((entry) => (
-                <tr key={entry.id} className="hover:bg-zinc-50">
-                  <td className="py-2.5 px-4 text-zinc-500 whitespace-nowrap">
-                    {formatShortDate(entry.createdAt)}
-                  </td>
-                  <td className="py-2.5 px-4">
-                    <span className="font-semibold text-zinc-900">{entry.category}</span>
-                    <span className="text-zinc-400 mx-1.5">·</span>
-                    <span className="text-zinc-700">{entry.description}</span>
-                  </td>
-                  <td className="py-2.5 px-4 text-zinc-600">{entry.actorName}</td>
-                  <td
-                    className={`py-2.5 px-4 text-right font-mono font-semibold tabular-price ${
-                      entry.type === 'MASUK' ? 'text-[#14532D]' : 'text-red-700'
-                    }`}
-                  >
-                    {entry.type === 'MASUK' ? '+' : '-'} {formatRupiah(entry.amount)}
-                  </td>
+      {!isCashierKasbonMode && (
+        <div className="bg-white border border-zinc-200 rounded-xl overflow-hidden">
+          <div className="px-6 py-4 border-b border-zinc-200">
+            <h3 className="text-base font-semibold text-zinc-900">Buku Kas Harian</h3>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse text-sm">
+              <thead>
+                <tr className="border-b border-zinc-200 bg-zinc-50 text-xs text-zinc-500">
+                  <th className="py-3 px-4 font-medium">Waktu</th>
+                  <th className="py-3 px-4 font-medium">Kategori & Keterangan</th>
+                  <th className="py-3 px-4 font-medium">Petugas</th>
+                  <th className="py-3 px-4 font-medium text-right">Nominal</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="divide-y divide-zinc-100 text-xs">
+                {ledger.map((entry) => (
+                  <tr key={entry.id} className="hover:bg-zinc-50">
+                    <td className="py-2.5 px-4 text-zinc-500 whitespace-nowrap">
+                      {formatShortDate(entry.createdAt)}
+                    </td>
+                    <td className="py-2.5 px-4">
+                      <span className="font-semibold text-zinc-900">{entry.category}</span>
+                      <span className="text-zinc-400 mx-1.5">·</span>
+                      <span className="text-zinc-700">{entry.description}</span>
+                    </td>
+                    <td className="py-2.5 px-4 text-zinc-600">{entry.actorName}</td>
+                    <td
+                      className={`py-2.5 px-4 text-right font-mono font-semibold tabular-price ${
+                        entry.type === 'MASUK' ? 'text-[#14532D]' : 'text-red-700'
+                      }`}
+                    >
+                      {entry.type === 'MASUK' ? '+' : '-'} {formatRupiah(entry.amount)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

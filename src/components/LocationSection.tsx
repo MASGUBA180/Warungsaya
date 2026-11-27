@@ -1,6 +1,7 @@
 import {Check, Clock, Copy, ExternalLink, MapPin, Truck} from 'lucide-react';
 import {useState} from 'react';
 import type {StoreSettings} from '../types/store';
+import {DeliveryMap} from './DeliveryMap';
 
 const ORDER_STEPS = [
   {
@@ -112,6 +113,15 @@ export function LocationSection({settings, onOpenTracker}: LocationSectionProps)
                 </a>
               </div>
             </div>
+
+            <DeliveryMap
+              mapInstanceId="storefront-location-map"
+              storeName={settings.name}
+              storeAddress={settings.fullAddress}
+              storeCoords={settings.storeCoords}
+              mapsUrl={settings.mapsUrl}
+              heightClass="h-52"
+            />
           </div>
 
           {/* Right: Ordering guide & order tracking shortcut */}

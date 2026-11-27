@@ -1,4 +1,4 @@
-import {Check} from 'lucide-react';
+import {AlertTriangle, Check, X} from 'lucide-react';
 import {useCallback, useEffect, useState} from 'react';
 import {CartDrawer, CartItem} from './components/CartDrawer';
 import {Footer} from './components/Footer';
@@ -36,6 +36,7 @@ export default function App() {
   const [isTrackerOpen, setIsTrackerOpen] = useState(false);
   const [trackerInitialCode, setTrackerInitialCode] = useState('');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [mapsQuotaBanner, setMapsQuotaBanner] = useState(false);
 
   const fetchStoreCatalog = useCallback(async () => {
     try {
@@ -61,6 +62,12 @@ export default function App() {
     const timer = window.setTimeout(() => setToastMessage(null), 2400);
     return () => window.clearTimeout(timer);
   }, [toastMessage]);
+
+  useEffect(() => {
+    const onQuota = () => setMapsQuotaBanner(true);
+    window.addEventListener('gmp-quota-exceeded', onQuota);
+    return () => window.removeEventListener('gmp-quota-exceeded', onQuota);
+  }, []);
 
   const handleAddToCart = (product: Product, variant: ProductVariant, quantity: number) => {
     if (variant.stock <= 0) return;
@@ -104,20 +111,56 @@ export default function App() {
 
   const totalCartCount = cartItems.reduce((sum, item) => sum + item.quantity, 0);
 
+  const quotaBanner = mapsQuotaBanner ? (
+    <div
+      role="alert"
+      className="sticky top-0 z-50 bg-amber-50 border-b border-amber-200 px-4 py-2.5 text-xs text-amber-950"
+    >
+      <div className="max-w-6xl mx-auto flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2 min-w-0">
+          <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" aria-hidden="true" />
+          <p className="truncate sm:whitespace-normal">
+            Batas kuota Google Maps tercapai atau kunci peta belum diaktifkan — tampilan beralih ke peta rute lokal.{' '}
+            <a
+              href="https://developers.google.com/maps/ai/ai-studio?utm_campaign=gmp_mcp_codeassist_v1_aistudio#quota_exceeded_errors"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-semibold underline underline-offset-2 text-amber-900"
+            >
+              Panduan Kuota & Billing
+            </a>
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setMapsQuotaBanner(false)}
+          aria-label="Tutup pemberitahuan peta"
+          className="p-1 text-amber-800 hover:bg-amber-100 rounded cursor-pointer shrink-0"
+        >
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+    </div>
+  ) : null;
+
   if (viewMode === 'portal') {
     return (
-      <StaffPortal
-        onBackToStorefront={() => {
-          setViewMode('storefront');
-          fetchStoreCatalog();
-        }}
-        onStoreDataChanged={fetchStoreCatalog}
-      />
+      <>
+        {quotaBanner}
+        <StaffPortal
+          onBackToStorefront={() => {
+            setViewMode('storefront');
+            fetchStoreCatalog();
+          }}
+          onStoreDataChanged={fetchStoreCatalog}
+        />
+      </>
     );
   }
 
   return (
     <div className="min-h-screen flex flex-col bg-[#FAFAFA] text-zinc-900">
+      {quotaBanner}
       <Header
         cartCount={totalCartCount}
         onOpenCart={() => setIsCartOpen(true)}
@@ -194,6 +237,7 @@ export default function App() {
         isOpen={isTrackerOpen}
         onClose={() => setIsTrackerOpen(false)}
         initialCode={trackerInitialCode}
+        settings={settings}
       />
 
       {toastMessage && (

@@ -4,7 +4,9 @@ import {
 } from './storeData';
 import type {
   AuthUser,
+  DeliveryCheckpoint,
   DivisionRole,
+  GeoPoint,
   KasbonRecord,
   LedgerEntry,
   Order,
@@ -15,6 +17,7 @@ import type {
   ProductCategory,
   StockMovement,
   StoreSettings,
+  SupplierDelivery,
 } from '../types/store';
 
 interface LocalStaffRecord {
@@ -34,6 +37,7 @@ interface LocalStoreDb {
   stockMovements: StockMovement[];
   ledger: LedgerEntry[];
   kasbon: KasbonRecord[];
+  supplierDeliveries: SupplierDelivery[];
   staff: LocalStaffRecord[];
   orderSeq: number;
 }
@@ -171,6 +175,13 @@ function seedLocalDatabase(): LocalStoreDb {
         total: 170000,
         handledBy: 'Kasir Toko',
         courierName: 'Kurir Gang Makam',
+        tracking: {
+          checkpoint: 'MENUJU_LOKASI',
+          locationNote: 'Kurir berangkat dari toko melewati simpang Gang Makam',
+          progressPercent: 55,
+          etaMinutes: 10,
+          updatedAt: now,
+        },
         createdAt: now,
         updatedAt: now,
       },
@@ -262,6 +273,24 @@ function seedLocalDatabase(): LocalStoreDb {
         updatedAt: now,
       },
     ],
+    supplierDeliveries: [
+      {
+        id: 'sup-seed-1',
+        supplierId: 'seed-supplier',
+        supplierName: 'Penggilingan Padi Gunung Batin',
+        productId: 'beras-pandan-wangi',
+        productName: 'Beras Pulen Pilihan',
+        variantId: 'beras-5kg',
+        variantLabel: 'Karung 5 kg',
+        quantity: 10,
+        unitCost: 64000,
+        note: 'Surat Jalan SJ-014 (sudah masuk gudang)',
+        status: 'DITERIMA',
+        receivedBy: 'Divisi Gudang',
+        createdAt: now,
+        receivedAt: now,
+      },
+    ],
     staff: [],
     orderSeq: 1002,
   };
@@ -271,7 +300,11 @@ function readLocalDb(): LocalStoreDb {
   try {
     const raw = window.localStorage.getItem(LOCAL_DB_KEY);
     if (raw) {
-      return JSON.parse(raw) as LocalStoreDb;
+      const parsed = JSON.parse(raw) as LocalStoreDb;
+      if (!Array.isArray(parsed.supplierDeliveries)) {
+        parsed.supplierDeliveries = [];
+      }
+      return parsed;
     }
   } catch {
     // ignore
@@ -287,6 +320,34 @@ function writeLocalDb(db: LocalStoreDb): void {
   } catch {
     // ignore quota errors
   }
+}
+
+function parseLocalGeoPoint(raw: unknown): GeoPoint | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const candidate = raw as {lat?: unknown; lng?: unknown};
+  const lat = Number(candidate.lat);
+  const lng = Number(candidate.lng);
+  if (
+    !Number.isFinite(lat) ||
+    !Number.isFinite(lng) ||
+    lat < -90 ||
+    lat > 90 ||
+    lng < -180 ||
+    lng > 180
+  ) {
+    return null;
+  }
+  return {
+    lat: Number(lat.toFixed(6)),
+    lng: Number(lng.toFixed(6)),
+  };
+}
+
+function sanitizeOrderForLocalRole(order: Order): Order {
+  return {
+    ...order,
+    items: order.items.map((i) => ({...i, costPrice: 0})),
+  };
 }
 
 function syncProductAvailability(product: Product): void {
@@ -511,6 +572,8 @@ async function handleStaticFallback(
         ? db.settings.deliveryFee
         : 0;
 
+    const customerCoords = parseLocalGeoPoint(body.customerCoords);
+
     const newOrder: Order = {
       id: randomId('ord'),
       orderNumber,
@@ -531,6 +594,18 @@ async function handleStaticFallback(
       total: subtotal + deliveryFee,
       handledBy: '',
       courierName: '',
+      customerCoords: deliveryMethod === 'cod' ? customerCoords : null,
+      tracking:
+        deliveryMethod === 'cod'
+          ? {
+              checkpoint: 'PERSIAPAN_TOKO',
+              locationNote: 'Pesanan masuk, menunggu disiapkan di Toko Dimas Jaya',
+              progressPercent: 15,
+              etaMinutes: 25,
+              courierCoords: db.settings.storeCoords || null,
+              updatedAt: now,
+            }
+          : undefined,
       createdAt: now,
       updatedAt: now,
     };
@@ -540,7 +615,7 @@ async function handleStaticFallback(
       ok: true,
       status: 201,
       storageMode: 'browser',
-      data: {order: newOrder},
+      data: {order: sanitizeOrderForLocalRole(newOrder)},
     };
   }
 
@@ -562,7 +637,15 @@ async function handleStaticFallback(
         data: {error: 'Pesanan tidak ditemukan atau 4 digit terakhir nomor HP tidak cocok.'},
       };
     }
-    return {ok: true, status: 200, storageMode: 'browser', data: {order}};
+    return {
+      ok: true,
+      status: 200,
+      storageMode: 'browser',
+      data: {
+        storeCoords: db.settings.storeCoords || null,
+        order: sanitizeOrderForLocalRole(order),
+      },
+    };
   }
 
   // --- AUTHENTICATED OPS ---
@@ -577,12 +660,49 @@ async function handleStaticFallback(
   }
 
   if (path === '/api/ops/bootstrap' && method === 'GET') {
+    const role = user.role;
+    const canSeeFinancialOverview = role === 'PEMILIK' || role === 'KEUANGAN';
     const totalRevenue = db.ledger
       .filter((l) => l.type === 'MASUK')
       .reduce((s, l) => s + l.amount, 0);
     const totalExpense = db.ledger
       .filter((l) => l.type === 'KELUAR')
       .reduce((s, l) => s + l.amount, 0);
+
+    let scopedProducts: Product[] = [];
+    if (role === 'PEMILIK' || role === 'GUDANG') {
+      scopedProducts = db.products;
+    } else if (role === 'KASIR' || role === 'PEMASOK') {
+      scopedProducts = db.products.map((p) => ({
+        ...p,
+        variants: p.variants.map(({costPrice: _c, ...rest}) => rest),
+      }));
+    }
+
+    let scopedOrders: Order[] = [];
+    if (role === 'PEMILIK') {
+      scopedOrders = db.orders;
+    } else if (role === 'KASIR') {
+      scopedOrders = db.orders.map(sanitizeOrderForLocalRole);
+    } else if (role === 'GUDANG') {
+      scopedOrders = db.orders
+        .filter((o) => o.source === 'ONLINE')
+        .map(sanitizeOrderForLocalRole);
+    } else if (role === 'KURIR') {
+      scopedOrders = db.orders
+        .filter((o) => o.deliveryMethod === 'cod')
+        .map(sanitizeOrderForLocalRole);
+    }
+
+    let scopedSupplierDeliveries: SupplierDelivery[] = [];
+    if (role === 'PEMILIK' || role === 'GUDANG') {
+      scopedSupplierDeliveries = db.supplierDeliveries;
+    } else if (role === 'PEMASOK') {
+      scopedSupplierDeliveries = db.supplierDeliveries.filter(
+        (d) => d.supplierId === user.id
+      );
+    }
+
     return {
       ok: true,
       status: 200,
@@ -591,30 +711,46 @@ async function handleStaticFallback(
         user,
         settings: db.settings,
         overview: {
-          totalRevenue,
-          totalExpense,
-          netCash: totalRevenue - totalExpense,
-          pendingOrdersCount: db.orders.filter(
-            (o) => o.status === 'MENUNGGU' || o.status === 'DISIAPKAN'
-          ).length,
-          activeDeliveriesCount: db.orders.filter((o) => o.status === 'DIANTAR').length,
-          lowStockCount: db.products.reduce(
-            (c, p) => c + p.variants.filter((v) => v.stock <= v.minStock).length,
-            0
-          ),
-          totalKasbonOutstanding: db.kasbon.reduce(
-            (s, k) => s + Math.max(0, k.amountDue - k.totalPaid),
-            0
-          ),
-          totalOrders: db.orders.length,
+          totalRevenue: canSeeFinancialOverview ? totalRevenue : 0,
+          totalExpense: canSeeFinancialOverview ? totalExpense : 0,
+          netCash: canSeeFinancialOverview ? totalRevenue - totalExpense : 0,
+          pendingOrdersCount:
+            role === 'PEMILIK' || role === 'KASIR' || role === 'GUDANG'
+              ? db.orders.filter(
+                  (o) => o.status === 'MENUNGGU' || o.status === 'DISIAPKAN'
+                ).length
+              : 0,
+          activeDeliveriesCount:
+            role === 'PEMILIK' || role === 'KURIR'
+              ? db.orders.filter((o) => o.deliveryMethod === 'cod' && o.status === 'DIANTAR')
+                  .length
+              : 0,
+          lowStockCount:
+            role === 'PEMILIK' || role === 'GUDANG' || role === 'PEMASOK'
+              ? db.products.reduce(
+                  (c, p) => c + p.variants.filter((v) => v.stock <= v.minStock).length,
+                  0
+                )
+              : 0,
+          totalKasbonOutstanding: canSeeFinancialOverview
+            ? db.kasbon.reduce((s, k) => s + Math.max(0, k.amountDue - k.totalPaid), 0)
+            : 0,
+          totalOrders: role === 'PEMILIK' || role === 'KASIR' ? db.orders.length : 0,
+          pendingSupplierDeliveriesCount:
+            role === 'PEMILIK' || role === 'GUDANG' || role === 'PEMASOK'
+              ? db.supplierDeliveries.filter((d) => d.status === 'MENUNGGU_TERIMA').length
+              : 0,
         },
-        products: db.products,
-        orders: db.orders,
-        stockMovements: db.stockMovements.slice(0, 60),
-        ledger: db.ledger.slice(0, 80),
-        kasbon: db.kasbon,
+        products: scopedProducts,
+        orders: scopedOrders,
+        stockMovements:
+          role === 'PEMILIK' || role === 'GUDANG' ? db.stockMovements.slice(0, 60) : [],
+        ledger: canSeeFinancialOverview ? db.ledger.slice(0, 80) : [],
+        kasbon:
+          role === 'PEMILIK' || role === 'KEUANGAN' || role === 'KASIR' ? db.kasbon : [],
+        supplierDeliveries: scopedSupplierDeliveries,
         staff:
-          user.role === 'PEMILIK'
+          role === 'PEMILIK'
             ? db.staff.map(({passcodeHash: _h, ...rest}) => rest)
             : [],
       },
@@ -625,6 +761,7 @@ async function handleStaticFallback(
     if (user.role !== 'PEMILIK') {
       return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Khusus Pemilik.'}};
     }
+    const parsedCoords = parseLocalGeoPoint(body.storeCoords);
     db.settings = {
       ...db.settings,
       hours: String(body.hours || db.settings.hours).trim(),
@@ -632,6 +769,10 @@ async function handleStaticFallback(
       deliveryArea: String(body.deliveryArea || db.settings.deliveryArea).trim(),
       deliveryFee: Math.max(0, Number(body.deliveryFee ?? db.settings.deliveryFee)),
       freeDeliveryMin: Math.max(0, Number(body.freeDeliveryMin ?? db.settings.freeDeliveryMin)),
+      storeCoords:
+        body.storeCoords === null
+          ? null
+          : parsedCoords ?? db.settings.storeCoords ?? null,
     };
     writeLocalDb(db);
     return {ok: true, status: 200, storageMode: 'browser', data: {settings: db.settings}};
@@ -801,6 +942,9 @@ async function handleStaticFallback(
   }
 
   if (path.startsWith('/api/ops/orders/') && path.endsWith('/status') && method === 'PATCH') {
+    if (!['PEMILIK', 'KASIR', 'GUDANG', 'KURIR'].includes(user.role)) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Akses ditolak.'}};
+    }
     const segments = path.split('/');
     const orderId = segments[4];
     const nextStatus = body.status as OrderStatus;
@@ -809,11 +953,52 @@ async function handleStaticFallback(
       return {ok: false, status: 404, storageMode: 'browser', data: {error: 'Pesanan tidak ditemukan.'}};
     }
     const prevStatus = order.status;
+    if (user.role === 'GUDANG' && (order.source !== 'ONLINE' || prevStatus !== 'MENUNGGU' || nextStatus !== 'DISIAPKAN')) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Gudang hanya menyiapkan pesanan online.'}};
+    }
+    if (user.role === 'KURIR' && (order.deliveryMethod !== 'cod' || !['DIANTAR', 'SELESAI'].includes(nextStatus))) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Kurir hanya menangani pesanan COD.'}};
+    }
+    if (user.role === 'KASIR' && (nextStatus === 'DIANTAR' || (nextStatus === 'SELESAI' && order.deliveryMethod === 'cod'))) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Pengantaran COD ditangani Divisi Kurir.'}};
+    }
     const now = new Date().toISOString();
     order.status = nextStatus;
     order.updatedAt = now;
     if (nextStatus === 'DIANTAR' || (nextStatus === 'SELESAI' && order.deliveryMethod === 'cod')) {
       order.courierName = order.courierName || user.displayName;
+    }
+    if (order.deliveryMethod === 'cod') {
+      if (nextStatus === 'DISIAPKAN') {
+        order.tracking = {
+          checkpoint: 'PERSIAPAN_TOKO',
+          locationNote: 'Barang sedang dikemas di Toko Dimas Jaya',
+          progressPercent: 25,
+          etaMinutes: order.tracking?.etaMinutes ?? 20,
+          courierCoords: order.tracking?.courierCoords ?? db.settings.storeCoords ?? null,
+          updatedAt: now,
+        };
+      } else if (nextStatus === 'DIANTAR') {
+        order.tracking = {
+          checkpoint: 'MENUJU_LOKASI',
+          locationNote:
+            order.tracking?.locationNote || 'Kurir berangkat dari toko menuju lokasi pelanggan',
+          progressPercent: Math.max(55, order.tracking?.progressPercent ?? 55),
+          etaMinutes: order.tracking?.etaMinutes ?? 12,
+          courierCoords: order.tracking?.courierCoords ?? db.settings.storeCoords ?? null,
+          updatedAt: now,
+        };
+      } else if (nextStatus === 'SELESAI') {
+        order.tracking = {
+          checkpoint: 'SUDAH_TIBA',
+          locationNote: 'Kurir sudah tiba & pesanan COD selesai diserahkan',
+          progressPercent: 100,
+          etaMinutes: 0,
+          courierCoords:
+            order.customerCoords ?? order.tracking?.courierCoords ?? db.settings.storeCoords ?? null,
+          updatedAt: now,
+        };
+      }
     }
     if (nextStatus === 'DIBATALKAN' && prevStatus !== 'DIBATALKAN') {
       for (const item of order.items) {
@@ -839,6 +1024,53 @@ async function handleStaticFallback(
         });
       }
     }
+    writeLocalDb(db);
+    return {ok: true, status: 200, storageMode: 'browser', data: {order}};
+  }
+
+  if (path.startsWith('/api/ops/orders/') && path.endsWith('/tracking') && method === 'PATCH') {
+    if (!['PEMILIK', 'KURIR'].includes(user.role)) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Khusus Kurir / Pemilik.'}};
+    }
+    const orderId = path.split('/')[4];
+    const order = db.orders.find((o) => o.id === orderId);
+    if (!order || order.deliveryMethod !== 'cod') {
+      return {ok: false, status: 404, storageMode: 'browser', data: {error: 'Pesanan COD tidak ditemukan.'}};
+    }
+    const checkpoint = (body.checkpoint || 'MENUJU_LOKASI') as DeliveryCheckpoint;
+    const defaultProgress: Record<DeliveryCheckpoint, number> = {
+      PERSIAPAN_TOKO: 20,
+      MENUJU_LOKASI: 55,
+      DEKAT_TUJUAN: 85,
+      SUDAH_TIBA: 100,
+    };
+    const now = new Date().toISOString();
+    const parsedCoords = parseLocalGeoPoint(body.courierCoords);
+    order.courierName = order.courierName || user.displayName;
+    order.updatedAt = now;
+    if (
+      (checkpoint === 'MENUJU_LOKASI' ||
+        checkpoint === 'DEKAT_TUJUAN' ||
+        checkpoint === 'SUDAH_TIBA') &&
+      (order.status === 'MENUNGGU' || order.status === 'DISIAPKAN')
+    ) {
+      order.status = 'DIANTAR';
+    }
+    order.tracking = {
+      checkpoint,
+      locationNote: String(body.locationNote || '').trim() || 'Posisi kurir diperbarui',
+      progressPercent: Number.isFinite(Number(body.progressPercent))
+        ? Math.min(100, Math.max(0, Math.round(Number(body.progressPercent))))
+        : defaultProgress[checkpoint] ?? 55,
+      etaMinutes: Number.isFinite(Number(body.etaMinutes))
+        ? Math.max(0, Math.round(Number(body.etaMinutes)))
+        : order.tracking?.etaMinutes,
+      courierCoords:
+        body.courierCoords === null
+          ? null
+          : parsedCoords ?? order.tracking?.courierCoords ?? null,
+      updatedAt: now,
+    };
     writeLocalDb(db);
     return {ok: true, status: 200, storageMode: 'browser', data: {order}};
   }
@@ -925,7 +1157,94 @@ async function handleStaticFallback(
     return {ok: true, status: 201, storageMode: 'browser', data: {product, movement}};
   }
 
+  if (path === '/api/ops/supplier/deliveries' && method === 'POST') {
+    if (!['PEMILIK', 'PEMASOK'].includes(user.role)) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Khusus Pemasok / Pemilik.'}};
+    }
+    const product = db.products.find((p) => p.id === body.productId);
+    const variant = product?.variants.find((v) => v.id === body.variantId);
+    const quantity = Math.floor(Number(body.quantity || 0));
+    if (!product || !variant || quantity <= 0) {
+      return {ok: false, status: 400, storageMode: 'browser', data: {error: 'Data suplai tidak valid.'}};
+    }
+    const delivery: SupplierDelivery = {
+      id: randomId('sup'),
+      supplierId: user.id,
+      supplierName: user.displayName,
+      productId: product.id,
+      productName: product.name,
+      variantId: variant.id,
+      variantLabel: variant.label,
+      quantity,
+      unitCost: Math.max(0, Math.round(Number(body.unitCost || 0))) || variant.costPrice || 0,
+      note: String(body.note || '').trim() || 'Suplai barang masuk ke gudang',
+      status: 'MENUNGGU_TERIMA',
+      createdAt: new Date().toISOString(),
+    };
+    db.supplierDeliveries.unshift(delivery);
+    writeLocalDb(db);
+    return {ok: true, status: 201, storageMode: 'browser', data: {delivery}};
+  }
+
+  if (
+    path.startsWith('/api/ops/supplier/deliveries/') &&
+    path.endsWith('/receive') &&
+    method === 'PATCH'
+  ) {
+    if (!['PEMILIK', 'GUDANG'].includes(user.role)) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Khusus Gudang / Pemilik.'}};
+    }
+    const id = path.split('/')[5];
+    const delivery = db.supplierDeliveries.find((d) => d.id === id);
+    if (!delivery) {
+      return {ok: false, status: 404, storageMode: 'browser', data: {error: 'Kiriman pemasok tidak ditemukan.'}};
+    }
+    if (delivery.status === 'DITERIMA') {
+      return {ok: true, status: 200, storageMode: 'browser', data: {delivery}};
+    }
+    const product = db.products.find((p) => p.id === delivery.productId);
+    const variant = product?.variants.find((v) => v.id === delivery.variantId);
+    if (!product || !variant) {
+      return {ok: false, status: 404, storageMode: 'browser', data: {error: 'Produk tidak ditemukan.'}};
+    }
+    const now = new Date().toISOString();
+    delivery.status = 'DITERIMA';
+    delivery.receivedBy = user.displayName;
+    delivery.receivedAt = now;
+    variant.stock += delivery.quantity;
+    syncProductAvailability(product);
+    db.stockMovements.unshift({
+      id: randomId('stk'),
+      productId: product.id,
+      productName: product.name,
+      variantId: variant.id,
+      variantLabel: variant.label,
+      type: 'MASUK',
+      quantityDelta: delivery.quantity,
+      note: `Terima kiriman pemasok ${delivery.supplierName}`,
+      actorName: user.displayName,
+      createdAt: now,
+    });
+    if (body.recordExpense && delivery.unitCost > 0) {
+      db.ledger.unshift({
+        id: randomId('ldg'),
+        type: 'KELUAR',
+        category: 'Kulakan Pemasok',
+        description: `Suplai ${delivery.supplierName}: ${product.name} x${delivery.quantity}`,
+        amount: delivery.unitCost * delivery.quantity,
+        paymentMethod: 'TUNAI',
+        actorName: user.displayName,
+        createdAt: now,
+      });
+    }
+    writeLocalDb(db);
+    return {ok: true, status: 200, storageMode: 'browser', data: {delivery, product}};
+  }
+
   if (path === '/api/ops/ledger' && method === 'POST') {
+    if (!['PEMILIK', 'KEUANGAN'].includes(user.role)) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Khusus Keuangan / Pemilik.'}};
+    }
     const entry: LedgerEntry = {
       id: randomId('ldg'),
       type: body.type === 'MASUK' ? 'MASUK' : 'KELUAR',

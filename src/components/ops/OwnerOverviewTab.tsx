@@ -1,5 +1,5 @@
-import {Eye, EyeOff} from 'lucide-react';
-import {useState, type FormEvent} from 'react';
+import {Eye, EyeOff, Navigation} from 'lucide-react';
+import {useEffect, useState, type FormEvent} from 'react';
 import {
   formatRupiah,
   formatShortDate,
@@ -9,11 +9,13 @@ import {
 import {apiFetch} from '../../lib/apiClient';
 import type {
   DivisionRole,
+  GeoPoint,
   Order,
   Product,
   PublicStaffProfile,
   StoreSettings,
 } from '../../types/store';
+import {DeliveryMap} from '../DeliveryMap';
 
 export interface OverviewMetrics {
   totalRevenue: number;
@@ -22,6 +24,7 @@ export interface OverviewMetrics {
   pendingOrdersCount: number;
   activeDeliveriesCount: number;
   lowStockCount: number;
+  pendingSupplierDeliveriesCount?: number;
   totalKasbonOutstanding: number;
   totalOrders: number;
 }
@@ -35,7 +38,7 @@ interface OwnerOverviewTabProps {
   settings: StoreSettings;
   authToken: string;
   onRefresh: () => Promise<void>;
-  onNavigateTab: (tab: 'kasir' | 'gudang' | 'kurir' | 'keuangan') => void;
+  onNavigateTab: (tab: 'kasir' | 'gudang' | 'pemasok' | 'kurir' | 'keuangan') => void;
 }
 
 export function OwnerOverviewTab({
@@ -67,8 +70,14 @@ export function OwnerOverviewTab({
   const [deliveryArea, setDeliveryArea] = useState(settings.deliveryArea);
   const [deliveryFee, setDeliveryFee] = useState(String(settings.deliveryFee));
   const [freeDeliveryMin, setFreeDeliveryMin] = useState(String(settings.freeDeliveryMin));
+  const [storeCoords, setStoreCoords] = useState<GeoPoint | null>(settings.storeCoords ?? null);
+  const [storeGpsNotice, setStoreGpsNotice] = useState('');
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsSavedMsg, setSettingsSavedMsg] = useState('');
+
+  useEffect(() => {
+    setStoreCoords(settings.storeCoords ?? null);
+  }, [settings.storeCoords]);
 
   const lowStockVariants = products.flatMap((p) =>
     p.variants
@@ -165,6 +174,30 @@ export function OwnerOverviewTab({
     }
   };
 
+  const handleCaptureStoreGps = () => {
+    if (!navigator.geolocation) {
+      setStoreGpsNotice('Browser tidak mendukung GPS. Klik langsung lokasi toko di peta.');
+      return;
+    }
+    setStoreGpsNotice('Mengambil koordinat GPS toko...');
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const pt: GeoPoint = {
+          lat: Number(pos.coords.latitude.toFixed(6)),
+          lng: Number(pos.coords.longitude.toFixed(6)),
+        };
+        setStoreCoords(pt);
+        setStoreGpsNotice(
+          `Pin toko diperbarui ke (${pt.lat.toFixed(4)}, ${pt.lng.toFixed(4)}). Klik Simpan Pengaturan.`
+        );
+      },
+      () => {
+        setStoreGpsNotice('Izin GPS belum aktif. Anda tetap bisa klik langsung titik toko di peta.');
+      },
+      {enableHighAccuracy: true, timeout: 8000}
+    );
+  };
+
   const handleSaveSettings = async (e: FormEvent) => {
     e.preventDefault();
     setSavingSettings(true);
@@ -182,6 +215,7 @@ export function OwnerOverviewTab({
           deliveryArea,
           deliveryFee: Number(deliveryFee),
           freeDeliveryMin: Number(freeDeliveryMin),
+          storeCoords,
         }),
       });
       if (res.ok) {
@@ -205,7 +239,7 @@ export function OwnerOverviewTab({
             <div>
               <h3 className="text-base font-semibold text-zinc-900">Tambah Akun Staf Divisi</h3>
               <p className="text-xs text-zinc-500 mt-0.5">
-                Buat akses khusus untuk Kasir, Gudang, Kurir Antar, atau Keuangan.
+                Buat akses khusus untuk Kasir, Gudang, Mitra Pemasok, Kurir Antar, atau Keuangan.
               </p>
             </div>
 
@@ -251,7 +285,8 @@ export function OwnerOverviewTab({
                   className="w-full px-3 py-2 min-h-[40px] text-sm bg-white border border-zinc-300 rounded-lg focus:outline-none focus:border-[#14532D]"
                 >
                   <option value="KASIR">Divisi Kasir</option>
-                  <option value="GUDANG">Divisi Gudang & Stok</option>
+                  <option value="GUDANG">Divisi Gudang &amp; Stok</option>
+                  <option value="PEMASOK">Mitra Pemasok / Supplier</option>
                   <option value="KURIR">Divisi Kurir Antar</option>
                   <option value="KEUANGAN">Divisi Keuangan</option>
                   <option value="PEMILIK">Pemilik / Wakil</option>
@@ -486,6 +521,49 @@ export function OwnerOverviewTab({
             />
           </div>
 
+          <div className="space-y-3 pt-2 border-t border-zinc-100">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold text-zinc-800">
+                  Pin Koordinat Toko di Peta (Titik Berangkat Kurir)
+                </p>
+                <p className="text-[11px] text-zinc-500">
+                  Klik langsung pada peta atau gunakan GPS saat berada di toko agar rute kurir dan pelanggan akurat.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleCaptureStoreGps}
+                className="inline-flex items-center gap-1.5 px-3 py-2 min-h-[38px] rounded-lg border border-zinc-300 bg-white text-xs font-medium text-zinc-800 hover:bg-zinc-50 cursor-pointer whitespace-nowrap"
+              >
+                <Navigation className="w-3.5 h-3.5 text-[#14532D]" aria-hidden="true" />
+                <span>Ambil GPS Toko Sekarang</span>
+              </button>
+            </div>
+
+            <DeliveryMap
+              mapInstanceId="owner-store-settings-map"
+              storeName={settings.name}
+              storeAddress={settings.fullAddress}
+              storeCoords={storeCoords}
+              mapsUrl={settings.mapsUrl}
+              heightClass="h-56"
+              interactivePickTarget="store"
+              onPickCoords={(coords) => {
+                setStoreCoords(coords);
+                setStoreGpsNotice(
+                  `Pin toko dipilih (${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)}). Klik Simpan Pengaturan.`
+                );
+              }}
+            />
+
+            {storeGpsNotice && (
+              <p className="text-[11px] text-[#14532D] bg-emerald-50 border border-emerald-200 rounded-lg p-2.5">
+                {storeGpsNotice}
+              </p>
+            )}
+          </div>
+
           <div className="flex items-center justify-between gap-4">
             <span className="text-xs text-[#14532D] font-medium">{settingsSavedMsg}</span>
             <button
@@ -535,13 +613,13 @@ export function OwnerOverviewTab({
       </div>
 
       {/* Division operational queues */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <button
           type="button"
           onClick={() => onNavigateTab('kasir')}
           className="text-left bg-white border border-zinc-200 rounded-xl p-5 hover:border-zinc-300 transition-colors cursor-pointer"
         >
-          <p className="text-xs text-zinc-500">Divisi Kasir & Pesanan</p>
+          <p className="text-xs text-zinc-500">Divisi Kasir &amp; Pesanan</p>
           <p className="text-xl font-bold text-zinc-900 tabular-price mt-1">
             {overview.pendingOrdersCount} Pesanan Perlu Diproses
           </p>
@@ -565,11 +643,23 @@ export function OwnerOverviewTab({
           onClick={() => onNavigateTab('gudang')}
           className="text-left bg-white border border-zinc-200 rounded-xl p-5 hover:border-zinc-300 transition-colors cursor-pointer"
         >
-          <p className="text-xs text-zinc-500">Divisi Gudang & Stok</p>
+          <p className="text-xs text-zinc-500">Divisi Gudang &amp; Stok</p>
           <p className="text-xl font-bold text-zinc-900 tabular-price mt-1">
             {overview.lowStockCount} Varian Stok Menipis
           </p>
           <p className="text-xs font-medium text-[#14532D] mt-2">Cek Stok Gudang →</p>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => onNavigateTab('pemasok')}
+          className="text-left bg-white border border-zinc-200 rounded-xl p-5 hover:border-zinc-300 transition-colors cursor-pointer"
+        >
+          <p className="text-xs text-zinc-500">Pemasok &amp; Suplai Barang</p>
+          <p className="text-xl font-bold text-zinc-900 tabular-price mt-1">
+            {overview.pendingSupplierDeliveriesCount ?? 0} Kiriman Menunggu
+          </p>
+          <p className="text-xs font-medium text-[#14532D] mt-2">Cek Antrean Suplai →</p>
         </button>
       </div>
 

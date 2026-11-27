@@ -12,12 +12,15 @@ import {
 } from './server/db.ts';
 import type {
   AuthUser,
+  DeliveryCheckpoint,
   DivisionRole,
+  GeoPoint,
   Order,
   OrderItem,
   OrderStatus,
   PaymentMethod,
   Product,
+  SupplierDelivery,
 } from './src/types/store.ts';
 
 const PORT = 3000;
@@ -28,6 +31,7 @@ const VALID_ROLES: DivisionRole[] = [
   'PEMILIK',
   'KASIR',
   'GUDANG',
+  'PEMASOK',
   'KURIR',
   'KEUANGAN',
 ];
@@ -151,6 +155,37 @@ function sanitizeProductForPublic(product: Product): Product {
       price: v.price,
       stock: v.stock,
       minStock: v.minStock,
+    })),
+  };
+}
+
+function parseGeoPoint(raw: unknown): GeoPoint | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const candidate = raw as {lat?: unknown; lng?: unknown};
+  const lat = Number(candidate.lat);
+  const lng = Number(candidate.lng);
+  if (
+    !Number.isFinite(lat) ||
+    !Number.isFinite(lng) ||
+    lat < -90 ||
+    lat > 90 ||
+    lng < -180 ||
+    lng > 180
+  ) {
+    return null;
+  }
+  return {
+    lat: Number(lat.toFixed(6)),
+    lng: Number(lng.toFixed(6)),
+  };
+}
+
+function sanitizeOrderItemsForRole(order: Order): Order {
+  return {
+    ...order,
+    items: order.items.map((item) => ({
+      ...item,
+      costPrice: 0,
     })),
   };
 }
@@ -404,6 +439,8 @@ async function startServer() {
         ? db.settings.deliveryFee
         : 0;
 
+    const customerCoords = parseGeoPoint(req.body?.customerCoords);
+
     const newOrder: Order = {
       id: `ord-${crypto.randomUUID().slice(0, 8)}`,
       orderNumber,
@@ -424,6 +461,18 @@ async function startServer() {
       total: subtotal + deliveryFee,
       handledBy: '',
       courierName: '',
+      customerCoords: deliveryMethod === 'cod' ? customerCoords : null,
+      tracking:
+        deliveryMethod === 'cod'
+          ? {
+              checkpoint: 'PERSIAPAN_TOKO',
+              locationNote: 'Pesanan masuk, menunggu disiapkan di Toko Dimas Jaya',
+              progressPercent: 15,
+              etaMinutes: 25,
+              courierCoords: db.settings.storeCoords || null,
+              updatedAt: now,
+            }
+          : undefined,
       createdAt: now,
       updatedAt: now,
     };
@@ -439,10 +488,12 @@ async function startServer() {
         addressNote: newOrder.addressNote,
         notes: newOrder.notes,
         status: newOrder.status,
-        items: newOrder.items,
+        items: newOrder.items.map(({costPrice: _c, ...rest}) => rest),
         subtotal: newOrder.subtotal,
         deliveryFee: newOrder.deliveryFee,
         total: newOrder.total,
+        customerCoords: newOrder.customerCoords || null,
+        tracking: newOrder.tracking,
         createdAt: newOrder.createdAt,
       },
     });
@@ -477,11 +528,14 @@ async function startServer() {
     }
 
     res.json({
+      storeCoords: db.settings.storeCoords || null,
       order: {
         orderNumber: order.orderNumber,
         customerName: order.customerName,
         deliveryMethod: order.deliveryMethod,
+        paymentMethod: order.paymentMethod,
         addressNote: order.addressNote,
+        notes: order.notes,
         status: order.status,
         items: order.items.map((i) => ({
           productName: i.productName,
@@ -492,7 +546,10 @@ async function startServer() {
         subtotal: order.subtotal,
         deliveryFee: order.deliveryFee,
         total: order.total,
+        handledBy: order.handledBy,
         courierName: order.courierName,
+        customerCoords: order.customerCoords || null,
+        tracking: order.tracking,
         createdAt: order.createdAt,
         updatedAt: order.updatedAt,
       },
@@ -514,7 +571,7 @@ async function startServer() {
       (o) => o.status === 'MENUNGGU' || o.status === 'DISIAPKAN'
     ).length;
     const activeDeliveriesCount = db.orders.filter(
-      (o) => o.status === 'DIANTAR'
+      (o) => o.deliveryMethod === 'cod' && o.status === 'DIANTAR'
     ).length;
     const lowStockCount = db.products.reduce(
       (count, p) =>
@@ -525,37 +582,82 @@ async function startServer() {
       (sum, k) => sum + Math.max(0, k.amountDue - k.totalPaid),
       0
     );
+    const pendingSupplierDeliveriesCount = db.supplierDeliveries.filter(
+      (d) => d.status === 'MENUNGGU_TERIMA'
+    ).length;
+
+    const canSeeFinancialOverview = role === 'PEMILIK' || role === 'KEUANGAN';
+
+    let scopedProducts: Product[] = [];
+    if (role === 'PEMILIK' || role === 'GUDANG') {
+      scopedProducts = db.products;
+    } else if (role === 'KASIR' || role === 'PEMASOK') {
+      scopedProducts = db.products.map(sanitizeProductForPublic);
+    }
+
+    let scopedOrders: Order[] = [];
+    if (role === 'PEMILIK') {
+      scopedOrders = db.orders;
+    } else if (role === 'KASIR') {
+      scopedOrders = db.orders.map(sanitizeOrderItemsForRole);
+    } else if (role === 'GUDANG') {
+      scopedOrders = db.orders
+        .filter((o) => o.source === 'ONLINE')
+        .map(sanitizeOrderItemsForRole);
+    } else if (role === 'KURIR') {
+      scopedOrders = db.orders
+        .filter((o) => o.deliveryMethod === 'cod')
+        .map(sanitizeOrderItemsForRole);
+    }
+
+    let scopedSupplierDeliveries: SupplierDelivery[] = [];
+    if (role === 'PEMILIK' || role === 'GUDANG') {
+      scopedSupplierDeliveries = db.supplierDeliveries;
+    } else if (role === 'PEMASOK') {
+      scopedSupplierDeliveries = db.supplierDeliveries
+        .filter((d) => d.supplierId === req.user!.id)
+        .map((d) => ({...d}));
+    }
 
     res.json({
       user: req.user,
       settings: db.settings,
       overview: {
-        totalRevenue,
-        totalExpense,
-        netCash: totalRevenue - totalExpense,
-        pendingOrdersCount,
-        activeDeliveriesCount,
-        lowStockCount,
-        totalKasbonOutstanding,
-        totalOrders: db.orders.length,
+        totalRevenue: canSeeFinancialOverview ? totalRevenue : 0,
+        totalExpense: canSeeFinancialOverview ? totalExpense : 0,
+        netCash: canSeeFinancialOverview ? totalRevenue - totalExpense : 0,
+        pendingOrdersCount:
+          role === 'PEMILIK' || role === 'KASIR' || role === 'GUDANG'
+            ? pendingOrdersCount
+            : 0,
+        activeDeliveriesCount:
+          role === 'PEMILIK' || role === 'KURIR' ? activeDeliveriesCount : 0,
+        lowStockCount:
+          role === 'PEMILIK' || role === 'GUDANG' || role === 'PEMASOK'
+            ? lowStockCount
+            : 0,
+        totalKasbonOutstanding: canSeeFinancialOverview
+          ? totalKasbonOutstanding
+          : 0,
+        totalOrders:
+          role === 'PEMILIK' || role === 'KASIR' ? db.orders.length : 0,
+        pendingSupplierDeliveriesCount:
+          role === 'PEMILIK' || role === 'GUDANG' || role === 'PEMASOK'
+            ? pendingSupplierDeliveriesCount
+            : 0,
       },
-      products:
-        role === 'PEMILIK' || role === 'GUDANG' || role === 'KEUANGAN'
-          ? db.products
-          : db.products.map(sanitizeProductForPublic),
-      orders: db.orders,
+      products: scopedProducts,
+      orders: scopedOrders,
       stockMovements:
         role === 'PEMILIK' || role === 'GUDANG'
           ? db.stockMovements.slice(0, 60)
           : [],
-      ledger:
-        role === 'PEMILIK' || role === 'KEUANGAN' || role === 'KASIR'
-          ? db.ledger.slice(0, 80)
-          : [],
+      ledger: canSeeFinancialOverview ? db.ledger.slice(0, 80) : [],
       kasbon:
         role === 'PEMILIK' || role === 'KEUANGAN' || role === 'KASIR'
           ? db.kasbon
           : [],
+      supplierDeliveries: scopedSupplierDeliveries,
       staff:
         role === 'PEMILIK'
           ? db.staff.map((s) => ({
@@ -587,6 +689,7 @@ async function startServer() {
         0,
         Number(req.body?.freeDeliveryMin ?? db.settings.freeDeliveryMin)
       );
+      const parsedCoords = parseGeoPoint(req.body?.storeCoords);
 
       db.settings = {
         ...db.settings,
@@ -597,6 +700,10 @@ async function startServer() {
         freeDeliveryMin: Number.isFinite(freeDeliveryMin)
           ? freeDeliveryMin
           : db.settings.freeDeliveryMin,
+        storeCoords:
+          req.body?.storeCoords === null
+            ? null
+            : parsedCoords ?? db.settings.storeCoords ?? null,
       };
       saveDatabase(db);
       res.json({settings: db.settings});
@@ -848,7 +955,7 @@ async function startServer() {
     }
   );
 
-  // Order status progression (Kasir, Gudang, Kurir, Pemilik)
+  // Order status progression (strict per-role workflow guards)
   app.patch(
     '/api/ops/orders/:id/status',
     requireAuth,
@@ -874,10 +981,41 @@ async function startServer() {
         return;
       }
 
+      const role = req.user!.role;
       const prevStatus = order.status;
       if (prevStatus === nextStatus) {
         res.json({order});
         return;
+      }
+
+      if (role === 'GUDANG') {
+        if (order.source !== 'ONLINE' || prevStatus !== 'MENUNGGU' || nextStatus !== 'DISIAPKAN') {
+          res.status(403).json({
+            error: 'Divisi Gudang hanya dapat menandai pesanan online menjadi Sedang Disiapkan.',
+          });
+          return;
+        }
+      } else if (role === 'KURIR') {
+        if (
+          order.deliveryMethod !== 'cod' ||
+          !['DIANTAR', 'SELESAI'].includes(nextStatus) ||
+          prevStatus === 'DIBATALKAN'
+        ) {
+          res.status(403).json({
+            error: 'Divisi Kurir hanya dapat mengantar dan menyelesaikan pesanan COD.',
+          });
+          return;
+        }
+      } else if (role === 'KASIR') {
+        if (
+          nextStatus === 'DIANTAR' ||
+          (nextStatus === 'SELESAI' && order.deliveryMethod === 'cod')
+        ) {
+          res.status(403).json({
+            error: 'Pengantaran & penyelesaian pesanan COD dikelola oleh Divisi Kurir.',
+          });
+          return;
+        }
       }
 
       const now = new Date().toISOString();
@@ -891,6 +1029,43 @@ async function startServer() {
           String(req.body?.courierName || '').trim() ||
           order.courierName ||
           req.user!.displayName;
+      }
+
+      if (order.deliveryMethod === 'cod') {
+        if (nextStatus === 'DISIAPKAN') {
+          order.tracking = {
+            checkpoint: 'PERSIAPAN_TOKO',
+            locationNote: 'Barang sedang dikemas di Toko Dimas Jaya',
+            progressPercent: 25,
+            etaMinutes: order.tracking?.etaMinutes ?? 20,
+            courierCoords: order.tracking?.courierCoords ?? db.settings.storeCoords ?? null,
+            updatedAt: now,
+          };
+        } else if (nextStatus === 'DIANTAR') {
+          order.tracking = {
+            checkpoint: 'MENUJU_LOKASI',
+            locationNote:
+              order.tracking?.locationNote ||
+              'Kurir berangkat dari toko menuju lokasi pelanggan',
+            progressPercent: Math.max(55, order.tracking?.progressPercent ?? 55),
+            etaMinutes: order.tracking?.etaMinutes ?? 12,
+            courierCoords: order.tracking?.courierCoords ?? db.settings.storeCoords ?? null,
+            updatedAt: now,
+          };
+        } else if (nextStatus === 'SELESAI') {
+          order.tracking = {
+            checkpoint: 'SUDAH_TIBA',
+            locationNote: 'Kurir sudah tiba & pesanan COD selesai diserahkan',
+            progressPercent: 100,
+            etaMinutes: 0,
+            courierCoords:
+              order.customerCoords ??
+              order.tracking?.courierCoords ??
+              db.settings.storeCoords ??
+              null,
+            updatedAt: now,
+          };
+        }
       }
 
       // Restore stock if cancelled from an active status
@@ -935,6 +1110,94 @@ async function startServer() {
           });
         }
       }
+
+      saveDatabase(db);
+      res.json({order});
+    }
+  );
+
+  // Kurir & Pemilik: Update Live Courier Tracking & Map Position
+  app.patch(
+    '/api/ops/orders/:id/tracking',
+    requireAuth,
+    requireRoles(['PEMILIK', 'KURIR']),
+    (req: AuthenticatedRequest, res) => {
+      const db = loadDatabase();
+      const order = db.orders.find((o) => o.id === req.params.id);
+      if (!order) {
+        res.status(404).json({error: 'Pesanan tidak ditemukan.'});
+        return;
+      }
+      if (order.deliveryMethod !== 'cod') {
+        res.status(400).json({error: 'Pelacakan kurir hanya berlaku untuk pesanan COD.'});
+        return;
+      }
+
+      const validCheckpoints: DeliveryCheckpoint[] = [
+        'PERSIAPAN_TOKO',
+        'MENUJU_LOKASI',
+        'DEKAT_TUJUAN',
+        'SUDAH_TIBA',
+      ];
+      const checkpoint = validCheckpoints.includes(req.body?.checkpoint)
+        ? (req.body.checkpoint as DeliveryCheckpoint)
+        : order.tracking?.checkpoint || 'MENUJU_LOKASI';
+
+      const defaultProgress: Record<DeliveryCheckpoint, number> = {
+        PERSIAPAN_TOKO: 20,
+        MENUJU_LOKASI: 55,
+        DEKAT_TUJUAN: 85,
+        SUDAH_TIBA: 100,
+      };
+      const defaultNotes: Record<DeliveryCheckpoint, string> = {
+        PERSIAPAN_TOKO: 'Pesanan sedang disiapkan di Toko Dimas Jaya',
+        MENUJU_LOKASI: 'Kurir sedang dalam perjalanan menuju alamat tujuan',
+        DEKAT_TUJUAN: 'Kurir sudah dekat lokasi rumah pemesan',
+        SUDAH_TIBA: 'Kurir sudah tiba di lokasi tujuan',
+      };
+
+      const rawProgress = Number(req.body?.progressPercent);
+      const progressPercent = Number.isFinite(rawProgress)
+        ? Math.min(100, Math.max(0, Math.round(rawProgress)))
+        : defaultProgress[checkpoint];
+
+      const locationNote =
+        String(req.body?.locationNote || '').trim() || defaultNotes[checkpoint];
+
+      const rawEta = Number(req.body?.etaMinutes);
+      const etaMinutes = Number.isFinite(rawEta) && rawEta >= 0
+        ? Math.round(rawEta)
+        : checkpoint === 'SUDAH_TIBA'
+          ? 0
+          : order.tracking?.etaMinutes;
+
+      const parsedCourierCoords =
+        req.body?.courierCoords === null
+          ? null
+          : parseGeoPoint(req.body?.courierCoords) ??
+            order.tracking?.courierCoords ??
+            null;
+
+      const now = new Date().toISOString();
+      order.courierName = order.courierName || req.user!.displayName;
+      order.updatedAt = now;
+      if (
+        (checkpoint === 'MENUJU_LOKASI' ||
+          checkpoint === 'DEKAT_TUJUAN' ||
+          checkpoint === 'SUDAH_TIBA') &&
+        (order.status === 'MENUNGGU' || order.status === 'DISIAPKAN')
+      ) {
+        order.status = 'DIANTAR';
+      }
+
+      order.tracking = {
+        checkpoint,
+        locationNote,
+        progressPercent,
+        etaMinutes,
+        courierCoords: parsedCourierCoords,
+        updatedAt: now,
+      };
 
       saveDatabase(db);
       res.json({order});
@@ -1141,7 +1404,117 @@ async function startServer() {
     }
   );
 
-  // Keuangan, Kasir & Pemilik: Ledger Entry
+  // Pemasok & Pemilik: Submit incoming supplier restock delivery
+  app.post(
+    '/api/ops/supplier/deliveries',
+    requireAuth,
+    requireRoles(['PEMILIK', 'PEMASOK']),
+    (req: AuthenticatedRequest, res) => {
+      const productId = String(req.body?.productId || '');
+      const variantId = String(req.body?.variantId || '');
+      const quantity = Math.floor(Number(req.body?.quantity || 0));
+      const unitCost = Math.max(0, Math.round(Number(req.body?.unitCost || 0)));
+      const note = String(req.body?.note || '').trim();
+
+      if (!productId || !variantId || !Number.isFinite(quantity) || quantity <= 0) {
+        res.status(400).json({error: 'Pilih produk, varian, dan jumlah suplai lebih dari 0.'});
+        return;
+      }
+
+      const db = loadDatabase();
+      const product = db.products.find((p) => p.id === productId);
+      const variant = product?.variants.find((v) => v.id === variantId);
+      if (!product || !variant) {
+        res.status(404).json({error: 'Produk atau varian barang tidak ditemukan.'});
+        return;
+      }
+
+      const now = new Date().toISOString();
+      const delivery: SupplierDelivery = {
+        id: `sup-${crypto.randomUUID().slice(0, 8)}`,
+        supplierId: req.user!.id,
+        supplierName: req.user!.displayName,
+        productId: product.id,
+        productName: product.name,
+        variantId: variant.id,
+        variantLabel: variant.label,
+        quantity,
+        unitCost: unitCost || variant.costPrice || Math.round(variant.price * 0.85),
+        note: note || 'Pengiriman suplai barang ke gudang Toko Dimas Jaya',
+        status: 'MENUNGGU_TERIMA',
+        createdAt: now,
+      };
+
+      db.supplierDeliveries.unshift(delivery);
+      saveDatabase(db);
+      res.status(201).json({delivery});
+    }
+  );
+
+  // Gudang & Pemilik: Verify & receive supplier delivery into stock
+  app.patch(
+    '/api/ops/supplier/deliveries/:id/receive',
+    requireAuth,
+    requireRoles(['PEMILIK', 'GUDANG']),
+    (req: AuthenticatedRequest, res) => {
+      const db = loadDatabase();
+      const delivery = db.supplierDeliveries.find((d) => d.id === req.params.id);
+      if (!delivery) {
+        res.status(404).json({error: 'Catatan kiriman pemasok tidak ditemukan.'});
+        return;
+      }
+      if (delivery.status === 'DITERIMA') {
+        res.json({delivery});
+        return;
+      }
+
+      const product = db.products.find((p) => p.id === delivery.productId);
+      const variant = product?.variants.find((v) => v.id === delivery.variantId);
+      if (!product || !variant) {
+        res.status(404).json({error: 'Produk tujuan di gudang tidak ditemukan.'});
+        return;
+      }
+
+      const now = new Date().toISOString();
+      delivery.status = 'DITERIMA';
+      delivery.receivedBy = req.user!.displayName;
+      delivery.receivedAt = now;
+
+      variant.stock += delivery.quantity;
+      syncProductAvailability(product);
+
+      db.stockMovements.unshift({
+        id: `stk-${crypto.randomUUID().slice(0, 8)}`,
+        productId: product.id,
+        productName: product.name,
+        variantId: variant.id,
+        variantLabel: variant.label,
+        type: 'MASUK',
+        quantityDelta: delivery.quantity,
+        note: `Terima kiriman pemasok ${delivery.supplierName} (${delivery.note})`,
+        actorName: req.user!.displayName,
+        createdAt: now,
+      });
+
+      if (req.body?.recordExpense && delivery.unitCost > 0) {
+        db.ledger.unshift({
+          id: `ldg-${crypto.randomUUID().slice(0, 8)}`,
+          type: 'KELUAR',
+          category: 'Kulakan Pemasok',
+          description: `Suplai ${delivery.supplierName}: ${product.name} (${variant.label}) x${delivery.quantity}`,
+          amount: delivery.unitCost * delivery.quantity,
+          paymentMethod: 'TUNAI',
+          actorName: req.user!.displayName,
+          createdAt: now,
+        });
+      }
+
+      saveDatabase(db);
+      res.json({delivery, product});
+    }
+  );
+
+  // Keuangan & Pemilik: Ledger Entry
   app.post(
     '/api/ops/ledger',
     requireAuth,

@@ -2,7 +2,14 @@ import {Minus, Plus, Trash2} from 'lucide-react';
 import {FormEvent, useState} from 'react';
 import {formatRupiah, formatShortDate, ORDER_STATUS_LABELS} from '../../lib/storeData';
 import {apiFetch} from '../../lib/apiClient';
-import type {Order, OrderStatus, PaymentMethod, Product, ProductVariant} from '../../types/store';
+import type {
+  DivisionRole,
+  Order,
+  OrderStatus,
+  PaymentMethod,
+  Product,
+  ProductVariant,
+} from '../../types/store';
 
 interface PosBasketItem {
   key: string;
@@ -12,6 +19,7 @@ interface PosBasketItem {
 }
 
 interface CashierPosTabProps {
+  role: DivisionRole;
   products: Product[];
   orders: Order[];
   authToken: string;
@@ -19,6 +27,7 @@ interface CashierPosTabProps {
 }
 
 export function CashierPosTab({
+  role,
   products,
   orders,
   authToken,
@@ -32,6 +41,7 @@ export function CashierPosTab({
   const [notes, setNotes] = useState('');
   const [posError, setPosError] = useState('');
   const [posSuccess, setPosSuccess] = useState('');
+  const [orderActionError, setOrderActionError] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
   const filteredProducts = products.filter((p) => {
@@ -124,8 +134,9 @@ export function CashierPosTab({
   };
 
   const handleUpdateOrderStatus = async (orderId: string, status: OrderStatus) => {
+    setOrderActionError('');
     try {
-      const res = await apiFetch(`/api/ops/orders/${orderId}/status`, {
+      const res = await apiFetch<{error?: string}>(`/api/ops/orders/${orderId}/status`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -135,9 +146,11 @@ export function CashierPosTab({
       });
       if (res.ok) {
         await onRefresh();
+      } else {
+        setOrderActionError(res.data.error || 'Aksi tidak diizinkan untuk peran Anda.');
       }
     } catch {
-      // ignore transient
+      setOrderActionError('Gagal memperbarui status pesanan.');
     }
   };
 
@@ -344,8 +357,15 @@ export function CashierPosTab({
             Antrean Pesanan Online & COD Masuk
           </h3>
           <p className="text-xs text-zinc-500 mt-0.5">
-            Konfirmasi pesanan baru dari warga sebelum disiapkan gudang atau diantar kurir.
+            {role === 'KASIR'
+              ? 'Konfirmasi pesanan warga dan selesaikan pengambilan di toko. Pengantaran COD dikelola oleh Kurir.'
+              : 'Konfirmasi pesanan baru dari warga sebelum disiapkan gudang atau diantar kurir.'}
           </p>
+          {orderActionError && (
+            <p className="mt-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-2.5">
+              {orderActionError}
+            </p>
+          )}
         </div>
 
         {onlineOrders.length === 0 ? (
@@ -397,7 +417,7 @@ export function CashierPosTab({
                       {formatRupiah(ord.total)}
                     </td>
                     <td className="py-3 px-4 text-right">
-                      <div className="inline-flex flex-wrap justify-end gap-1.5">
+                      <div className="inline-flex flex-wrap justify-end gap-1.5 items-center">
                         {ord.status === 'MENUNGGU' && (
                           <button
                             type="button"
@@ -407,24 +427,42 @@ export function CashierPosTab({
                             Siapkan
                           </button>
                         )}
-                        {ord.status === 'DISIAPKAN' && ord.deliveryMethod === 'cod' && (
-                          <button
-                            type="button"
-                            onClick={() => handleUpdateOrderStatus(ord.id, 'DIANTAR')}
-                            className="px-2.5 py-1.5 rounded bg-zinc-900 text-white text-xs font-medium hover:bg-zinc-800 cursor-pointer whitespace-nowrap"
-                          >
-                            Kirim Kurir
-                          </button>
-                        )}
-                        {(ord.status === 'DISIAPKAN' || ord.status === 'DIANTAR') && (
+                        {role === 'PEMILIK' &&
+                          ord.status === 'DISIAPKAN' &&
+                          ord.deliveryMethod === 'cod' && (
+                            <button
+                              type="button"
+                              onClick={() => handleUpdateOrderStatus(ord.id, 'DIANTAR')}
+                              className="px-2.5 py-1.5 rounded bg-zinc-900 text-white text-xs font-medium hover:bg-zinc-800 cursor-pointer whitespace-nowrap"
+                            >
+                              Kirim Kurir
+                            </button>
+                          )}
+                        {ord.status === 'DISIAPKAN' && ord.deliveryMethod === 'pickup' && (
                           <button
                             type="button"
                             onClick={() => handleUpdateOrderStatus(ord.id, 'SELESAI')}
                             className="px-2.5 py-1.5 rounded border border-zinc-300 bg-white text-zinc-800 text-xs font-medium hover:bg-zinc-50 cursor-pointer whitespace-nowrap"
                           >
-                            Selesai
+                            Selesai Diambil
                           </button>
                         )}
+                        {role === 'PEMILIK' &&
+                          ord.deliveryMethod === 'cod' &&
+                          (ord.status === 'DISIAPKAN' || ord.status === 'DIANTAR') && (
+                            <button
+                              type="button"
+                              onClick={() => handleUpdateOrderStatus(ord.id, 'SELESAI')}
+                              className="px-2.5 py-1.5 rounded border border-zinc-300 bg-white text-zinc-800 text-xs font-medium hover:bg-zinc-50 cursor-pointer whitespace-nowrap"
+                            >
+                              Selesai COD
+                            </button>
+                          )}
+                        {role === 'KASIR' &&
+                          ord.deliveryMethod === 'cod' &&
+                          (ord.status === 'DISIAPKAN' || ord.status === 'DIANTAR') && (
+                            <span className="text-[11px] text-zinc-500 px-2">Menunggu Kurir</span>
+                          )}
                         {(ord.status === 'MENUNGGU' || ord.status === 'DISIAPKAN') && (
                           <button
                             type="button"

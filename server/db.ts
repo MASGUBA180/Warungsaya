@@ -9,6 +9,7 @@ import type {
   Product,
   StockMovement,
   StoreSettings,
+  SupplierDelivery,
 } from '../src/types/store.ts';
 
 export interface StoredStaff {
@@ -28,6 +29,7 @@ export interface TokoDatabase {
   stockMovements: StockMovement[];
   ledger: LedgerEntry[];
   kasbon: KasbonRecord[];
+  supplierDeliveries: SupplierDelivery[];
   staff: StoredStaff[];
   orderSeq: number;
 }
@@ -256,6 +258,13 @@ function createInitialDatabase(): TokoDatabase {
         total: 170000,
         handledBy: 'Kasir Toko',
         courierName: 'Kurir Gang Makam',
+        tracking: {
+          checkpoint: 'MENUJU_LOKASI',
+          locationNote: 'Kurir berangkat dari toko melewati simpang Gang Makam',
+          progressPercent: 55,
+          etaMinutes: 10,
+          updatedAt: now,
+        },
         createdAt: now,
         updatedAt: now,
       },
@@ -359,6 +368,24 @@ function createInitialDatabase(): TokoDatabase {
         updatedAt: now,
       },
     ],
+    supplierDeliveries: [
+      {
+        id: 'sup-seed-1',
+        supplierId: 'seed-supplier',
+        supplierName: 'Penggilingan Padi Gunung Batin',
+        productId: 'beras-pandan-wangi',
+        productName: 'Beras Pulen Pilihan',
+        variantId: 'beras-5kg',
+        variantLabel: 'Karung 5 kg',
+        quantity: 10,
+        unitCost: 64000,
+        note: 'Surat Jalan SJ-014 (sudah masuk gudang)',
+        status: 'DITERIMA',
+        receivedBy: 'Divisi Gudang',
+        createdAt: now,
+        receivedAt: now,
+      },
+    ],
     staff: [],
     orderSeq: 1002,
   };
@@ -375,7 +402,11 @@ export function loadDatabase(): TokoDatabase {
   }
   try {
     const raw = fs.readFileSync(DB_FILE, 'utf8');
-    return JSON.parse(raw) as TokoDatabase;
+    const parsed = JSON.parse(raw) as TokoDatabase;
+    if (!Array.isArray(parsed.supplierDeliveries)) {
+      parsed.supplierDeliveries = [];
+    }
+    return parsed;
   } catch {
     const fallback = createInitialDatabase();
     fs.writeFileSync(DB_FILE, JSON.stringify(fallback, null, 2), 'utf8');

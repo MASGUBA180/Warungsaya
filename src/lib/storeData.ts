@@ -204,8 +204,24 @@ export const ROLE_LABELS: Record<DivisionRole, string> = {
   PEMILIK: 'Pemilik Toko',
   KASIR: 'Divisi Kasir',
   GUDANG: 'Divisi Gudang & Stok',
-  KURIR: 'Divisi Pengantaran / Kurir',
+  PEMASOK: 'Mitra Pemasok / Supplier',
+  KURIR: 'Divisi Kurir Antar',
   KEUANGAN: 'Divisi Keuangan & Kasbon',
+};
+
+export const ROLE_SCOPE_DESCRIPTIONS: Record<DivisionRole, string> = {
+  PEMILIK:
+    'Akses penuh ke omzet, laba/kas, semua divisi, manajemen akun staf/pemasok, dan pengaturan toko.',
+  KASIR:
+    'Fokus transaksi meja kasir (POS), konfirmasi pesanan masuk, dan pencatatan cicilan kasbon pelanggan.',
+  GUDANG:
+    'Mengelola stok fisik, opname, produk baru, penyiapan barang pesanan, dan penerimaan kiriman pemasok.',
+  PEMASOK:
+    'Melihat kebutuhan stok menipis dan mengirim catatan suplai barang masuk tanpa akses kas, pelanggan, atau staf.',
+  KURIR:
+    'Khusus antrean antar COD, berbagi lokasi langsung kurir di peta, dan konfirmasi setoran tunai saat tiba.',
+  KEUANGAN:
+    'Mengelola buku kas harian, pemasukan/pengeluaran operasional, dan pelunasan kasbon pelanggan.',
 };
 
 export const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
@@ -214,6 +230,16 @@ export const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
   DIANTAR: 'Sedang Diantar',
   SELESAI: 'Selesai',
   DIBATALKAN: 'Dibatalkan',
+};
+
+export const DELIVERY_CHECKPOINT_LABELS: Record<
+  import('../types/store').DeliveryCheckpoint,
+  {label: string; progress: number}
+> = {
+  PERSIAPAN_TOKO: {label: 'Disiapkan di Toko Dimas Jaya', progress: 20},
+  MENUJU_LOKASI: {label: 'Kurir Dalam Perjalanan (Gang Makam)', progress: 55},
+  DEKAT_TUJUAN: {label: 'Kurir Sudah Dekat Rumah Tujuan', progress: 85},
+  SUDAH_TIBA: {label: 'Kurir Sudah Tiba / Barang Diterima', progress: 100},
 };
 
 export function formatRupiah(amount: number): string {

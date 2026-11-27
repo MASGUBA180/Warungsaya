@@ -1,7 +1,7 @@
 import {ArrowLeft, Eye, EyeOff, LogOut, RefreshCw} from 'lucide-react';
 import {FormEvent, useCallback, useEffect, useState} from 'react';
 import {apiFetch} from '../../lib/apiClient';
-import {ROLE_LABELS} from '../../lib/storeData';
+import {ROLE_LABELS, ROLE_SCOPE_DESCRIPTIONS} from '../../lib/storeData';
 import type {
   AuthUser,
   DivisionRole,
@@ -12,14 +12,23 @@ import type {
   PublicStaffProfile,
   StockMovement,
   StoreSettings,
+  SupplierDelivery,
 } from '../../types/store';
 import {CashierPosTab} from './CashierPosTab';
 import {CourierTab} from './CourierTab';
 import {FinanceTab} from './FinanceTab';
 import {OverviewMetrics, OwnerOverviewTab} from './OwnerOverviewTab';
+import {SupplierTab} from './SupplierTab';
 import {WarehouseTab} from './WarehouseTab';
 
-type OpsTab = 'overview' | 'kasir' | 'gudang' | 'kurir' | 'keuangan' | 'admin';
+type OpsTab =
+  | 'overview'
+  | 'kasir'
+  | 'gudang'
+  | 'pemasok'
+  | 'kurir'
+  | 'keuangan'
+  | 'admin';
 
 interface StaffPortalProps {
   onBackToStorefront: () => void;
@@ -34,10 +43,23 @@ const TAB_CONFIG: {
   {id: 'overview', label: 'Ringkasan Pemilik', roles: ['PEMILIK']},
   {id: 'kasir', label: 'Kasir & POS', roles: ['PEMILIK', 'KASIR']},
   {id: 'gudang', label: 'Gudang & Stok', roles: ['PEMILIK', 'GUDANG']},
-  {id: 'kurir', label: 'Kurir & Antar COD', roles: ['PEMILIK', 'KURIR', 'KASIR']},
+  {id: 'pemasok', label: 'Pemasok & Suplai', roles: ['PEMILIK', 'GUDANG', 'PEMASOK']},
+  {id: 'kurir', label: 'Kurir & Peta Antar', roles: ['PEMILIK', 'KURIR']},
   {id: 'keuangan', label: 'Keuangan & Kasbon', roles: ['PEMILIK', 'KEUANGAN', 'KASIR']},
   {id: 'admin', label: 'Staf & Pengaturan', roles: ['PEMILIK']},
 ];
+
+function getTabLabelForRole(tab: {id: OpsTab; label: string}, role: DivisionRole): string {
+  if (tab.id === 'pemasok') {
+    if (role === 'PEMASOK') return 'Suplai Pemasok';
+    if (role === 'GUDANG') return 'Terima Pemasok';
+    return 'Pemasok & Suplai';
+  }
+  if (tab.id === 'keuangan' && role === 'KASIR') {
+    return 'Kasbon Pelanggan';
+  }
+  return tab.label;
+}
 
 export function StaffPortal({
   onBackToStorefront,
@@ -72,6 +94,7 @@ export function StaffPortal({
   const [products, setProducts] = useState<Product[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
   const [stockMovements, setStockMovements] = useState<StockMovement[]>([]);
+  const [supplierDeliveries, setSupplierDeliveries] = useState<SupplierDelivery[]>([]);
   const [ledger, setLedger] = useState<LedgerEntry[]>([]);
   const [kasbon, setKasbon] = useState<KasbonRecord[]>([]);
   const [staff, setStaff] = useState<PublicStaffProfile[]>([]);
@@ -104,6 +127,7 @@ export function StaffPortal({
           products?: Product[];
           orders?: Order[];
           stockMovements?: StockMovement[];
+          supplierDeliveries?: SupplierDelivery[];
           ledger?: LedgerEntry[];
           kasbon?: KasbonRecord[];
           staff?: PublicStaffProfile[];
@@ -124,6 +148,7 @@ export function StaffPortal({
         setProducts(data.products || []);
         setOrders(data.orders || []);
         setStockMovements(data.stockMovements || []);
+        setSupplierDeliveries(data.supplierDeliveries || []);
         setLedger(data.ledger || []);
         setKasbon(data.kasbon || []);
         setStaff(data.staff || []);
@@ -471,7 +496,7 @@ export function StaffPortal({
                       : 'text-zinc-700 hover:bg-zinc-100 hover:text-zinc-900'
                   }`}
                 >
-                  {tab.label}
+                  {getTabLabelForRole(tab, user.role)}
                 </button>
               );
             })}
@@ -499,7 +524,8 @@ export function StaffPortal({
         <header className="bg-white border-b border-zinc-200 px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
           <div className="min-w-0">
             <p className="text-sm font-semibold text-zinc-900 truncate">
-              Portal Staf <span className="text-zinc-400 mx-1">/</span> {currentTabConfig?.label}
+              Portal Staf <span className="text-zinc-400 mx-1">/</span>{' '}
+              {currentTabConfig ? getTabLabelForRole(currentTabConfig, user.role) : ''}
             </p>
             <p className="text-xs text-zinc-500 lg:hidden truncate">
               {user.displayName} · {ROLE_LABELS[user.role]}
@@ -551,7 +577,18 @@ export function StaffPortal({
               <div className="h-64 bg-zinc-200 rounded-xl" />
             </div>
           ) : (
-            <>
+            <div className="space-y-6">
+              <div className="bg-white border border-zinc-200 rounded-xl px-5 py-3.5 flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="text-xs font-semibold text-[#14532D]">
+                    Hak Akses: {ROLE_LABELS[user.role]}
+                  </p>
+                  <p className="text-xs text-zinc-600 mt-0.5">
+                    {ROLE_SCOPE_DESCRIPTIONS[user.role]}
+                  </p>
+                </div>
+              </div>
+
               {(currentTabConfig?.id === 'overview' || currentTabConfig?.id === 'admin') && (
                 <OwnerOverviewTab
                   mode={currentTabConfig.id === 'admin' ? 'admin' : 'overview'}
@@ -568,6 +605,7 @@ export function StaffPortal({
 
               {currentTabConfig?.id === 'kasir' && (
                 <CashierPosTab
+                  role={user.role}
                   products={products}
                   orders={orders}
                   authToken={authToken}
@@ -579,6 +617,21 @@ export function StaffPortal({
                 <WarehouseTab
                   products={products}
                   stockMovements={stockMovements}
+                  orders={orders}
+                  pendingSupplierCount={
+                    supplierDeliveries.filter((d) => d.status === 'MENUNGGU_TERIMA').length
+                  }
+                  onOpenSupplierTab={() => setActiveTab('pemasok')}
+                  authToken={authToken}
+                  onRefresh={() => loadOperationalData(authToken)}
+                />
+              )}
+
+              {currentTabConfig?.id === 'pemasok' && (
+                <SupplierTab
+                  role={user.role}
+                  products={products}
+                  supplierDeliveries={supplierDeliveries}
                   authToken={authToken}
                   onRefresh={() => loadOperationalData(authToken)}
                 />
@@ -587,6 +640,7 @@ export function StaffPortal({
               {currentTabConfig?.id === 'kurir' && (
                 <CourierTab
                   orders={orders}
+                  settings={settings}
                   authToken={authToken}
                   onRefresh={() => loadOperationalData(authToken)}
                 />
@@ -601,7 +655,7 @@ export function StaffPortal({
                   onRefresh={() => loadOperationalData(authToken)}
                 />
               )}
-            </>
+            </div>
           )}
         </main>
       </div>

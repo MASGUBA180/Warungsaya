@@ -1,12 +1,20 @@
 import {Plus} from 'lucide-react';
 import {FormEvent, useState} from 'react';
-import {formatRupiah, formatShortDate, STORE_CATEGORIES} from '../../lib/storeData';
+import {
+  formatRupiah,
+  formatShortDate,
+  ORDER_STATUS_LABELS,
+  STORE_CATEGORIES,
+} from '../../lib/storeData';
 import {apiFetch} from '../../lib/apiClient';
-import type {Product, ProductCategory, StockMovement} from '../../types/store';
+import type {Order, Product, ProductCategory, StockMovement} from '../../types/store';
 
 interface WarehouseTabProps {
   products: Product[];
   stockMovements: StockMovement[];
+  orders?: Order[];
+  pendingSupplierCount?: number;
+  onOpenSupplierTab?: () => void;
   authToken: string;
   onRefresh: () => Promise<void>;
 }
@@ -14,6 +22,9 @@ interface WarehouseTabProps {
 export function WarehouseTab({
   products,
   stockMovements,
+  orders = [],
+  pendingSupplierCount = 0,
+  onOpenSupplierTab,
   authToken,
   onRefresh,
 }: WarehouseTabProps) {
@@ -128,8 +139,50 @@ export function WarehouseTab({
     }
   };
 
+  const [packingId, setPackingId] = useState<string | null>(null);
+
+  const onlinePackingOrders = orders.filter(
+    (o) => o.source === 'ONLINE' && (o.status === 'MENUNGGU' || o.status === 'DISIAPKAN')
+  );
+
+  const handleMarkOrderPrepared = async (orderId: string) => {
+    setPackingId(orderId);
+    try {
+      const res = await apiFetch(`/api/ops/orders/${orderId}/status`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({status: 'DISIAPKAN'}),
+      });
+      if (res.ok) {
+        await onRefresh();
+      }
+    } finally {
+      setPackingId(null);
+    }
+  };
+
   return (
     <div className="space-y-8">
+      {pendingSupplierCount > 0 && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex flex-wrap items-center justify-between gap-3">
+          <p className="text-xs text-amber-950">
+            Ada <strong className="tabular-price">{pendingSupplierCount}</strong> kiriman barang dari
+            pemasok menunggu verifikasi masuk stok gudang.
+          </p>
+          {onOpenSupplierTab && (
+            <button
+              type="button"
+              onClick={onOpenSupplierTab}
+              className="px-3.5 py-2 rounded-lg bg-[#14532D] text-white text-xs font-semibold hover:bg-[#166534] cursor-pointer whitespace-nowrap"
+            >
+              Buka Terima Pemasok
+            </button>
+          )}
+        </div>
+      )}
       {/* Toolbar */}
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-2">
@@ -461,6 +514,58 @@ export function WarehouseTab({
           </table>
         </div>
       </div>
+
+      {/* Online Packing Queue for Gudang */}
+      {onlinePackingOrders.length > 0 && (
+        <div className="bg-white border border-zinc-200 rounded-xl overflow-hidden">
+          <div className="px-6 py-4 border-b border-zinc-200">
+            <h3 className="text-base font-semibold text-zinc-900">
+              Antrean Pesanan Online Siap Kemas
+            </h3>
+            <p className="text-xs text-zinc-500 mt-0.5">
+              Siapkan barang pesanan warga sebelum diambil di toko atau dibawa oleh kurir.
+            </p>
+          </div>
+          <div className="divide-y divide-zinc-100">
+            {onlinePackingOrders.map((ord) => (
+              <div
+                key={ord.id}
+                className="px-6 py-4 flex flex-wrap items-center justify-between gap-4 text-xs"
+              >
+                <div className="space-y-1">
+                  <p className="font-mono font-semibold text-zinc-900 tabular-price">
+                    {ord.orderNumber} · {ORDER_STATUS_LABELS[ord.status]} ·{' '}
+                    {ord.deliveryMethod === 'cod' ? 'Antar COD' : 'Ambil di Toko'}
+                  </p>
+                  <p className="text-zinc-600">
+                    Pemesan: <span className="font-medium text-zinc-900">{ord.customerName}</span>
+                  </p>
+                  <p className="text-zinc-700">
+                    {ord.items
+                      .map((item) => `${item.productName} (${item.variantLabel}) x${item.quantity}`)
+                      .join(', ')}
+                  </p>
+                </div>
+
+                {ord.status === 'MENUNGGU' ? (
+                  <button
+                    type="button"
+                    disabled={packingId === ord.id}
+                    onClick={() => handleMarkOrderPrepared(ord.id)}
+                    className="px-3.5 py-2 rounded-lg bg-[#14532D] text-white text-xs font-semibold hover:bg-[#166534] disabled:opacity-60 cursor-pointer whitespace-nowrap"
+                  >
+                    {packingId === ord.id ? 'Memproses...' : 'Tandai Sedang Disiapkan'}
+                  </button>
+                ) : (
+                  <span className="px-3 py-1.5 rounded-md bg-emerald-50 text-[#14532D] font-semibold">
+                    Siap Diserahkan
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Stock Movement Log */}
       <div className="bg-white border border-zinc-200 rounded-xl overflow-hidden">

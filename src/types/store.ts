@@ -1,4 +1,10 @@
-export type DivisionRole = 'PEMILIK' | 'KASIR' | 'GUDANG' | 'KURIR' | 'KEUANGAN';
+export type DivisionRole =
+  | 'PEMILIK'
+  | 'KASIR'
+  | 'GUDANG'
+  | 'PEMASOK'
+  | 'KURIR'
+  | 'KEUANGAN';
 
 export type ProductCategory =
   | 'Semua'
@@ -15,7 +21,27 @@ export type OrderStatus =
   | 'SELESAI'
   | 'DIBATALKAN';
 
+export type DeliveryCheckpoint =
+  | 'PERSIAPAN_TOKO'
+  | 'MENUJU_LOKASI'
+  | 'DEKAT_TUJUAN'
+  | 'SUDAH_TIBA';
+
 export type PaymentMethod = 'COD' | 'TUNAI' | 'QRIS' | 'KASBON';
+
+export interface GeoPoint {
+  lat: number;
+  lng: number;
+}
+
+export interface DeliveryTrackingInfo {
+  checkpoint: DeliveryCheckpoint;
+  locationNote: string;
+  progressPercent: number;
+  etaMinutes?: number;
+  courierCoords?: GeoPoint | null;
+  updatedAt: string;
+}
 
 export interface ProductVariant {
   id: string;
@@ -52,6 +78,7 @@ export interface StoreSettings {
   freeDeliveryMin: number;
   mapsUrl: string;
   heroImage: string;
+  storeCoords?: GeoPoint | null;
 }
 
 export interface OrderItem {
@@ -81,6 +108,8 @@ export interface Order {
   total: number;
   handledBy: string;
   courierName: string;
+  customerCoords?: GeoPoint | null;
+  tracking?: DeliveryTrackingInfo;
   createdAt: string;
   updatedAt: string;
 }
@@ -96,6 +125,23 @@ export interface StockMovement {
   note: string;
   actorName: string;
   createdAt: string;
+}
+
+export interface SupplierDelivery {
+  id: string;
+  supplierId: string;
+  supplierName: string;
+  productId: string;
+  productName: string;
+  variantId: string;
+  variantLabel: string;
+  quantity: number;
+  unitCost: number;
+  note: string;
+  status: 'MENUNGGU_TERIMA' | 'DITERIMA';
+  receivedBy?: string;
+  createdAt: string;
+  receivedAt?: string;
 }
 
 export interface LedgerEntry {

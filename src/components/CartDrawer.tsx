@@ -1,8 +1,8 @@
-import {Check, Copy, Minus, Plus, ShoppingBag, Trash2, X} from 'lucide-react';
+import {Check, Copy, MapPin, Minus, Plus, ShoppingBag, Trash2, X} from 'lucide-react';
 import {FormEvent, useEffect, useState} from 'react';
 import {apiFetch} from '../lib/apiClient';
 import {formatRupiah} from '../lib/storeData';
-import type {Product, ProductVariant, StoreSettings} from '../types/store';
+import type {GeoPoint, Product, ProductVariant, StoreSettings} from '../types/store';
 
 export interface CartItem {
   key: string;
@@ -58,6 +58,8 @@ export function CartDrawer({
   const [formError, setFormError] = useState('');
   const [receipt, setReceipt] = useState<OrderReceipt | null>(null);
   const [copiedReceipt, setCopiedReceipt] = useState(false);
+  const [customerCoords, setCustomerCoords] = useState<GeoPoint | null>(null);
+  const [gpsStatus, setGpsStatus] = useState('');
 
   useEffect(() => {
     if (!isOpen) return;
@@ -100,6 +102,7 @@ export function CartDrawer({
             deliveryMethod,
             addressNote: addressNote.trim(),
             notes: notes.trim(),
+            customerCoords: deliveryMethod === 'cod' ? customerCoords : null,
             items: items.map((item) => ({
               productId: item.product.id,
               variantId: item.variant.id,
@@ -149,11 +152,35 @@ export function CartDrawer({
     }
   };
 
+  const handleCaptureGps = () => {
+    if (!navigator.geolocation) {
+      setGpsStatus('Browser tidak mendukung GPS. Alamat teks tetap bisa dipakai.');
+      return;
+    }
+    setGpsStatus('Mengambil titik GPS rumah Anda...');
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const pt: GeoPoint = {
+          lat: Number(pos.coords.latitude.toFixed(6)),
+          lng: Number(pos.coords.longitude.toFixed(6)),
+        };
+        setCustomerCoords(pt);
+        setGpsStatus(`Titik peta rumah tersimpan (${pt.lat.toFixed(4)}, ${pt.lng.toFixed(4)}).`);
+      },
+      () => {
+        setGpsStatus('Izin lokasi belum aktif. Kurir tetap dapat mengantar lewat patokan alamat.');
+      },
+      {enableHighAccuracy: true, timeout: 8000}
+    );
+  };
+
   const handleNewOrder = () => {
     setReceipt(null);
     setCustomerName('');
     setPhone('');
     setNotes('');
+    setCustomerCoords(null);
+    setGpsStatus('');
     onClose();
   };
 
@@ -417,7 +444,7 @@ export function CartDrawer({
                 </div>
 
                 {deliveryMethod === 'cod' && (
-                  <div>
+                  <div className="space-y-2">
                     <label htmlFor="order-address" className="block text-xs text-zinc-600 mb-1">
                       Alamat / Patokan Rumah
                     </label>
@@ -430,6 +457,31 @@ export function CartDrawer({
                       placeholder="Gang Makam RT ..., dekat ..."
                       className="w-full px-3 py-2 min-h-[40px] text-sm border border-zinc-300 rounded-lg focus:outline-none focus:border-[#14532D] focus:ring-1 focus:ring-[#14532D]"
                     />
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
+                      <button
+                        type="button"
+                        onClick={handleCaptureGps}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-zinc-300 bg-white text-xs font-medium text-zinc-800 hover:bg-zinc-50 cursor-pointer"
+                      >
+                        <MapPin className="w-3.5 h-3.5 text-[#14532D]" aria-hidden="true" />
+                        <span>
+                          {customerCoords ? 'Perbarui Pin Lokasi Saya' : 'Tandai Titik GPS Saya (Opsional)'}
+                        </span>
+                      </button>
+                      {customerCoords && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setCustomerCoords(null);
+                            setGpsStatus('');
+                          }}
+                          className="text-[11px] text-zinc-500 hover:text-zinc-800 cursor-pointer"
+                        >
+                          Hapus Pin
+                        </button>
+                      )}
+                    </div>
+                    {gpsStatus && <p className="text-[11px] text-zinc-600">{gpsStatus}</p>}
                   </div>
                 )}
 
