@@ -7,11 +7,25 @@ import {
   hashPasscode,
   loadDatabase,
   saveDatabase,
+  type StoredCustomer,
   type StoredStaff,
+  type TokoDatabase,
   verifyPasscode,
 } from './server/db.ts';
+import {
+  buildCourierWhatsappLink,
+  buildOrderQrisInfo,
+  normalizePhoneDigits,
+} from './src/lib/qrisHelpers.ts';
+import {isValidUploadedPhoto} from './src/lib/imageHelpers.ts';
 import type {
   AuthUser,
+  CashierShift,
+  ComplaintCategory,
+  ComplaintRecord,
+  ComplaintResolution,
+  ComplaintStatus,
+  CustomerProfile,
   DeliveryCheckpoint,
   DivisionRole,
   GeoPoint,
@@ -21,6 +35,7 @@ import type {
   PaymentMethod,
   Product,
   SupplierDelivery,
+  WhatsappNotification,
 } from './src/types/store.ts';
 
 const PORT = 3000;
@@ -29,6 +44,15 @@ const SESSION_SECRET =
 
 const VALID_ROLES: DivisionRole[] = [
   'PEMILIK',
+  'DIREKTUR',
+  'KASIR',
+  'GUDANG',
+  'PEMASOK',
+  'KURIR',
+  'KEUANGAN',
+];
+
+const DIRECTOR_MANAGED_ROLES: DivisionRole[] = [
   'KASIR',
   'GUDANG',
   'PEMASOK',
@@ -44,18 +68,29 @@ const VALID_CATEGORIES = [
   'Galon & Minuman',
 ] as const;
 
+const VALID_COMPLAINT_CATEGORIES: ComplaintCategory[] = [
+  'BARANG_RUSAK',
+  'KURANG_ITEM',
+  'SALAH_VARIAN',
+  'KEDALUWARSA',
+  'LAINNYA',
+];
+
+const VALID_COMPLAINT_RESOLUTIONS: ComplaintResolution[] = [
+  'GANTI_BARANG',
+  'REFUND_DANA',
+  'POTONG_TAGIHAN',
+];
+
 interface AuthenticatedRequest extends Request {
   user?: AuthUser;
 }
 
-function signSessionToken(user: AuthUser): string {
-  const payload = {
-    id: user.id,
-    username: user.username,
-    displayName: user.displayName,
-    role: user.role,
-    exp: Date.now() + 1000 * 60 * 60 * 12,
-  };
+interface CustomerAuthenticatedRequest extends Request {
+  customer?: CustomerProfile;
+}
+
+function signToken(payload: Record<string, unknown>): string {
   const encoded = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
   const signature = crypto
     .createHmac('sha256', SESSION_SECRET)
@@ -64,7 +99,7 @@ function signSessionToken(user: AuthUser): string {
   return `${encoded}.${signature}`;
 }
 
-function verifySessionToken(token: string): AuthUser | null {
+function verifyRawToken<T extends {exp?: number}>(token: string): T | null {
   const parts = token.split('.');
   if (parts.length !== 2) return null;
   const [encoded, providedSig] = parts;
@@ -80,20 +115,56 @@ function verifySessionToken(token: string): AuthUser | null {
   }
 
   try {
-    const parsed = JSON.parse(
-      Buffer.from(encoded, 'base64url').toString('utf8')
-    ) as AuthUser & {exp: number};
+    const parsed = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as T;
     if (!parsed.exp || Date.now() > parsed.exp) return null;
-    if (!VALID_ROLES.includes(parsed.role)) return null;
-    return {
-      id: parsed.id,
-      username: parsed.username,
-      displayName: parsed.displayName,
-      role: parsed.role,
-    };
+    return parsed;
   } catch {
     return null;
   }
+}
+
+function signSessionToken(user: AuthUser): string {
+  return signToken({
+    tokenKind: 'staff',
+    id: user.id,
+    username: user.username,
+    displayName: user.displayName,
+    role: user.role,
+    exp: Date.now() + 1000 * 60 * 60 * 12,
+  });
+}
+
+function verifySessionToken(token: string): AuthUser | null {
+  const parsed = verifyRawToken<AuthUser & {tokenKind?: string; exp: number}>(token);
+  if (!parsed || (parsed.tokenKind && parsed.tokenKind !== 'staff')) return null;
+  if (!VALID_ROLES.includes(parsed.role)) return null;
+  return {
+    id: parsed.id,
+    username: parsed.username,
+    displayName: parsed.displayName,
+    role: parsed.role,
+  };
+}
+
+function signCustomerToken(customer: CustomerProfile): string {
+  return signToken({
+    tokenKind: 'customer',
+    id: customer.id,
+    name: customer.name,
+    phone: customer.phone,
+    exp: Date.now() + 1000 * 60 * 60 * 24 * 7,
+  });
+}
+
+function verifyCustomerToken(token: string): {id: string; phone: string} | null {
+  const parsed = verifyRawToken<{
+    tokenKind?: string;
+    id?: string;
+    phone?: string;
+    exp: number;
+  }>(token);
+  if (!parsed || parsed.tokenKind !== 'customer' || !parsed.id) return null;
+  return {id: parsed.id, phone: String(parsed.phone || '')};
 }
 
 function requireAuth(
@@ -113,7 +184,6 @@ function requireAuth(
     return;
   }
 
-  // Verify active staff status unless env-configured owner
   if (user.id !== 'env-owner') {
     const db = loadDatabase();
     const staffRecord = db.staff.find((s) => s.id === user.id);
@@ -131,6 +201,36 @@ function requireAuth(
     req.user = user;
   }
 
+  next();
+}
+
+function extractCustomerFromHeader(req: Request, db: TokoDatabase): StoredCustomer | null {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
+  const token = authHeader.slice(7).trim();
+  const claims = verifyCustomerToken(token);
+  if (!claims) return null;
+  return db.customers.find((c) => c.id === claims.id) || null;
+}
+
+function requireCustomerAuth(
+  req: CustomerAuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): void {
+  const db = loadDatabase();
+  const record = extractCustomerFromHeader(req, db);
+  if (!record) {
+    res.status(401).json({error: 'Silakan masuk ke akun pelanggan terlebih dahulu.'});
+    return;
+  }
+  req.customer = {
+    id: record.id,
+    name: record.name,
+    phone: record.phone,
+    defaultAddress: record.defaultAddress,
+    createdAt: record.createdAt,
+  };
   next();
 }
 
@@ -152,10 +252,41 @@ function sanitizeProductForPublic(product: Product): Product {
     variants: product.variants.map((v) => ({
       id: v.id,
       label: v.label,
+      sku: v.sku,
       price: v.price,
       stock: v.stock,
       minStock: v.minStock,
+      expiryDate: v.expiryDate,
     })),
+  };
+}
+
+function sanitizeOrderForPublic(order: Order) {
+  return {
+    id: order.id,
+    orderNumber: order.orderNumber,
+    customerName: order.customerName,
+    deliveryMethod: order.deliveryMethod,
+    paymentMethod: order.paymentMethod,
+    paymentStatus: order.paymentStatus || (order.paymentMethod === 'QRIS' ? 'MENUNGGU_QRIS' : 'BELUM_BAYAR'),
+    qris: order.qris,
+    discountAmount: order.discountAmount || 0,
+    addressNote: order.addressNote,
+    notes: order.notes,
+    status: order.status,
+    items: order.items.map(({costPrice: _c, ...rest}) => rest),
+    subtotal: order.subtotal,
+    deliveryFee: order.deliveryFee,
+    total: order.total,
+    handledBy: order.handledBy,
+    courierName: order.courierName,
+    assignedCourierId: order.assignedCourierId,
+    assignedCourierName: order.assignedCourierName,
+    customerCoords: order.customerCoords || null,
+    tracking: order.tracking,
+    whatsappNotifications: order.whatsappNotifications || [],
+    createdAt: order.createdAt,
+    updatedAt: order.updatedAt,
   };
 }
 
@@ -201,9 +332,72 @@ function syncProductAvailability(product: Product): void {
   }
 }
 
+function recordAuditLog(
+  db: TokoDatabase,
+  actor: {id: string; displayName: string; role: string},
+  action: string,
+  target: string,
+  detail: string
+): void {
+  db.auditLogs.unshift({
+    id: `aud-${crypto.randomUUID().slice(0, 8)}`,
+    actorId: actor.id,
+    actorName: actor.displayName,
+    actorRole: actor.role,
+    action,
+    target,
+    detail,
+    createdAt: new Date().toISOString(),
+  });
+  if (db.auditLogs.length > 200) {
+    db.auditLogs = db.auditLogs.slice(0, 200);
+  }
+}
+
+function appendWhatsappNotification(
+  order: Order,
+  trigger: WhatsappNotification['trigger'],
+  actorName: string
+): WhatsappNotification {
+  const {waLink, message} = buildCourierWhatsappLink({
+    phone: order.phone,
+    customerName: order.customerName,
+    orderNumber: order.orderNumber,
+    courierName: order.courierName || actorName,
+    etaMinutes: order.tracking?.etaMinutes,
+    addressNote: order.addressNote,
+    total: order.total,
+    paymentStatus: order.paymentStatus,
+    trigger,
+  });
+
+  const notif: WhatsappNotification = {
+    id: `wa-${crypto.randomUUID().slice(0, 8)}`,
+    trigger,
+    recipientPhone: order.phone,
+    message,
+    waLink,
+    actorName,
+    sentAt: new Date().toISOString(),
+  };
+
+  if (!Array.isArray(order.whatsappNotifications)) {
+    order.whatsappNotifications = [];
+  }
+  order.whatsappNotifications.unshift(notif);
+  return notif;
+}
+
+function doesCustomerOwnOrder(customer: {id: string; phone: string}, order: Order): boolean {
+  if (order.customerId && order.customerId === customer.id) return true;
+  const custPhone = normalizePhoneDigits(customer.phone);
+  const ordPhone = normalizePhoneDigits(order.phone);
+  return Boolean(custPhone && ordPhone && custPhone === ordPhone);
+}
+
 async function startServer() {
   const app = express();
-  app.use(express.json({limit: '1mb'}));
+  app.use(express.json({limit: '8mb'}));
 
   function getConfiguredEnvOwnerPasscode(): string {
     const raw = (process.env.OWNER_PASSCODE || '').trim();
@@ -211,7 +405,7 @@ async function startServer() {
     return raw;
   }
 
-  // --- AUTH ROUTES ---
+  // --- STAFF AUTH ROUTES ---
   app.get('/api/auth/status', (_req, res) => {
     const db = loadDatabase();
     const envPasscodeActive = Boolean(getConfiguredEnvOwnerPasscode());
@@ -259,6 +453,13 @@ async function startServer() {
     };
 
     db.staff.push(ownerRecord);
+    recordAuditLog(
+      db,
+      {id: ownerRecord.id, displayName: ownerRecord.displayName, role: ownerRecord.role},
+      'CLAIM_PEMILIK',
+      ownerRecord.username,
+      'Aktivasi awal akun Pemilik Toko Dimas Jaya'
+    );
     saveDatabase(db);
 
     const authUser: AuthUser = {
@@ -332,6 +533,176 @@ async function startServer() {
     res.json({user: req.user});
   });
 
+  // --- CUSTOMER ACCOUNT & PORTAL ROUTES ---
+  app.post('/api/customer/register', (req, res) => {
+    const name = String(req.body?.name || '').trim();
+    const rawPhone = String(req.body?.phone || '').trim();
+    const normalizedPhone = normalizePhoneDigits(rawPhone);
+    const defaultAddress = String(req.body?.defaultAddress || '').trim();
+    const passcode = String(req.body?.passcode || '');
+
+    if (name.length < 2 || normalizedPhone.length < 8 || passcode.length < 6) {
+      res.status(400).json({
+        error: 'Nama minimal 2 karakter, nomor HP valid, dan kata sandi minimal 6 karakter.',
+      });
+      return;
+    }
+
+    const db = loadDatabase();
+    if (db.customers.some((c) => normalizePhoneDigits(c.phone) === normalizedPhone)) {
+      res.status(409).json({
+        error: 'Nomor HP ini sudah terdaftar. Silakan masuk dengan kata sandi Anda.',
+      });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const newCustomer: StoredCustomer = {
+      id: `cst-${crypto.randomUUID().slice(0, 8)}`,
+      name,
+      phone: normalizedPhone,
+      defaultAddress: defaultAddress || 'Gang Makam, Gunung Batin Udik',
+      passcodeHash: hashPasscode(passcode),
+      createdAt: now,
+    };
+
+    db.customers.push(newCustomer);
+
+    // Link historical orders with matching phone number automatically
+    for (const order of db.orders) {
+      if (!order.customerId && normalizePhoneDigits(order.phone) === normalizedPhone) {
+        order.customerId = newCustomer.id;
+      }
+    }
+
+    saveDatabase(db);
+
+    const profile: CustomerProfile = {
+      id: newCustomer.id,
+      name: newCustomer.name,
+      phone: newCustomer.phone,
+      defaultAddress: newCustomer.defaultAddress,
+      createdAt: newCustomer.createdAt,
+    };
+
+    res.status(201).json({
+      customerToken: signCustomerToken(profile),
+      customer: profile,
+    });
+  });
+
+  app.post('/api/customer/login', (req, res) => {
+    const normalizedPhone = normalizePhoneDigits(String(req.body?.phone || ''));
+    const passcode = String(req.body?.passcode || '');
+
+    if (!normalizedPhone || !passcode) {
+      res.status(400).json({error: 'Nomor HP dan kata sandi wajib diisi.'});
+      return;
+    }
+
+    const db = loadDatabase();
+    const customer = db.customers.find(
+      (c) => normalizePhoneDigits(c.phone) === normalizedPhone
+    );
+
+    if (!customer || !verifyPasscode(passcode, customer.passcodeHash)) {
+      res.status(401).json({error: 'Nomor HP atau kata sandi salah.'});
+      return;
+    }
+
+    const profile: CustomerProfile = {
+      id: customer.id,
+      name: customer.name,
+      phone: customer.phone,
+      defaultAddress: customer.defaultAddress,
+      createdAt: customer.createdAt,
+    };
+
+    res.json({
+      customerToken: signCustomerToken(profile),
+      customer: profile,
+    });
+  });
+
+  app.get('/api/customer/me', requireCustomerAuth, (req: CustomerAuthenticatedRequest, res) => {
+    const db = loadDatabase();
+    const customer = req.customer!;
+    const custPhoneDigits = normalizePhoneDigits(customer.phone);
+    const myOrders = db.orders
+      .filter((o) => doesCustomerOwnOrder(customer, o))
+      .map(sanitizeOrderForPublic);
+    const myComplaints = db.complaints.filter(
+      (c) =>
+        c.customerId === customer.id ||
+        normalizePhoneDigits(c.phone) === custPhoneDigits
+    );
+    const myKasbon = db.kasbon.filter((k) => {
+      const kp = normalizePhoneDigits(k.phone);
+      if (custPhoneDigits && kp) return kp === custPhoneDigits;
+      return k.customerName.trim().toLowerCase() === customer.name.trim().toLowerCase();
+    });
+    res.json({
+      customer,
+      orders: myOrders,
+      complaints: myComplaints,
+      kasbon: myKasbon,
+    });
+  });
+
+  app.patch(
+    '/api/customer/profile',
+    requireCustomerAuth,
+    (req: CustomerAuthenticatedRequest, res) => {
+      const db = loadDatabase();
+      const target = db.customers.find((c) => c.id === req.customer!.id);
+      if (!target) {
+        res.status(404).json({error: 'Akun pelanggan tidak ditemukan.'});
+        return;
+      }
+      const nextName = String(req.body?.name || target.name).trim();
+      const nextAddr = String(req.body?.defaultAddress || target.defaultAddress).trim();
+      if (nextName.length >= 2) target.name = nextName;
+      if (nextAddr.length >= 4) target.defaultAddress = nextAddr;
+
+      saveDatabase(db);
+      res.json({
+        customer: {
+          id: target.id,
+          name: target.name,
+          phone: target.phone,
+          defaultAddress: target.defaultAddress,
+          createdAt: target.createdAt,
+        },
+      });
+    }
+  );
+
+  app.patch(
+    '/api/customer/password',
+    requireCustomerAuth,
+    (req: CustomerAuthenticatedRequest, res) => {
+      const db = loadDatabase();
+      const target = db.customers.find((c) => c.id === req.customer!.id);
+      if (!target) {
+        res.status(404).json({error: 'Akun pelanggan tidak ditemukan.'});
+        return;
+      }
+      const currentPasscode = String(req.body?.currentPasscode || '');
+      const newPasscode = String(req.body?.newPasscode || '');
+      if (!verifyPasscode(currentPasscode, target.passcodeHash)) {
+        res.status(403).json({error: 'Kata sandi saat ini tidak cocok.'});
+        return;
+      }
+      if (newPasscode.length < 6) {
+        res.status(400).json({error: 'Kata sandi baru minimal 6 karakter.'});
+        return;
+      }
+      target.passcodeHash = hashPasscode(newPasscode);
+      saveDatabase(db);
+      res.json({updated: true});
+    }
+  );
+
   // --- PUBLIC STOREFRONT ROUTES ---
   app.get('/api/public/store', (_req, res) => {
     const db = loadDatabase();
@@ -342,12 +713,25 @@ async function startServer() {
   });
 
   app.post('/api/public/orders', (req, res) => {
-    const customerName = String(req.body?.customerName || '').trim();
-    const phone = String(req.body?.phone || '').trim();
+    const db = loadDatabase();
+    const loggedInCustomer = extractCustomerFromHeader(req, db);
+
+    const customerName = String(req.body?.customerName || loggedInCustomer?.name || '').trim();
+    const phone = String(req.body?.phone || loggedInCustomer?.phone || '').trim();
     const deliveryMethod =
       req.body?.deliveryMethod === 'pickup' ? 'pickup' : 'cod';
-    const addressNote = String(req.body?.addressNote || '').trim();
+    const addressNote = String(
+      req.body?.addressNote || (deliveryMethod === 'cod' ? loggedInCustomer?.defaultAddress : '') || ''
+    ).trim();
     const notes = String(req.body?.notes || '').trim();
+    const requestedPayment = req.body?.paymentMethod;
+    const paymentMethod: PaymentMethod =
+      requestedPayment === 'QRIS'
+        ? 'QRIS'
+        : deliveryMethod === 'cod'
+          ? 'COD'
+          : 'TUNAI';
+
     const rawItems = Array.isArray(req.body?.items) ? req.body.items : [];
 
     if (customerName.length < 2 || phone.length < 6) {
@@ -369,7 +753,6 @@ async function startServer() {
       return;
     }
 
-    const db = loadDatabase();
     const verifiedItems: OrderItem[] = [];
 
     for (const raw of rawItems) {
@@ -407,7 +790,6 @@ async function startServer() {
       });
     }
 
-    // Deduct stock & log movement
     const now = new Date().toISOString();
     for (const item of verifiedItems) {
       const product = db.products.find((p) => p.id === item.productId)!;
@@ -438,13 +820,26 @@ async function startServer() {
       deliveryMethod === 'cod' && subtotal < db.settings.freeDeliveryMin
         ? db.settings.deliveryFee
         : 0;
+    const grandTotal = subtotal + deliveryFee;
 
     const customerCoords = parseGeoPoint(req.body?.customerCoords);
+    const qris =
+      paymentMethod === 'QRIS'
+        ? buildOrderQrisInfo({
+            orderNumber,
+            amount: grandTotal,
+            merchantName: db.settings.qrisMerchantName,
+            nmid: db.settings.qrisNmid,
+            gatewayStatus: 'PENDING',
+            nowIso: now,
+          })
+        : undefined;
 
     const newOrder: Order = {
       id: `ord-${crypto.randomUUID().slice(0, 8)}`,
       orderNumber,
       source: 'ONLINE',
+      customerId: loggedInCustomer?.id ?? null,
       customerName,
       phone,
       deliveryMethod,
@@ -453,12 +848,14 @@ async function startServer() {
           ? addressNote
           : 'Ambil langsung di Toko Dimas Jaya (Gang Makam)',
       notes,
-      paymentMethod: deliveryMethod === 'cod' ? 'COD' : 'TUNAI',
+      paymentMethod,
+      paymentStatus: paymentMethod === 'QRIS' ? 'MENUNGGU_QRIS' : 'BELUM_BAYAR',
+      qris,
       status: 'MENUNGGU',
       items: verifiedItems,
       subtotal,
       deliveryFee,
-      total: subtotal + deliveryFee,
+      total: grandTotal,
       handledBy: '',
       courierName: '',
       customerCoords: deliveryMethod === 'cod' ? customerCoords : null,
@@ -473,6 +870,7 @@ async function startServer() {
               updatedAt: now,
             }
           : undefined,
+      whatsappNotifications: [],
       createdAt: now,
       updatedAt: now,
     };
@@ -481,43 +879,102 @@ async function startServer() {
     saveDatabase(db);
 
     res.status(201).json({
-      order: {
-        orderNumber: newOrder.orderNumber,
-        customerName: newOrder.customerName,
-        deliveryMethod: newOrder.deliveryMethod,
-        addressNote: newOrder.addressNote,
-        notes: newOrder.notes,
-        status: newOrder.status,
-        items: newOrder.items.map(({costPrice: _c, ...rest}) => rest),
-        subtotal: newOrder.subtotal,
-        deliveryFee: newOrder.deliveryFee,
-        total: newOrder.total,
-        customerCoords: newOrder.customerCoords || null,
-        tracking: newOrder.tracking,
-        createdAt: newOrder.createdAt,
-      },
+      order: sanitizeOrderForPublic(newOrder),
     });
   });
 
-  app.get('/api/public/orders/track', (req, res) => {
-    const code = String(req.query?.code || '').trim().toUpperCase();
-    const phoneSuffix = String(req.query?.phone || '')
+  // Dynamic QRIS automatic settlement check/webhook simulation for public order
+  app.post('/api/public/orders/:orderNumber/qris-pay', (req, res) => {
+    const db = loadDatabase();
+    const orderNumber = String(req.params.orderNumber || '').trim().toUpperCase();
+    const loggedInCustomer = extractCustomerFromHeader(req, db);
+    const phoneLast4 = String(req.body?.phoneLast4 || '')
       .replace(/\D/g, '')
       .slice(-4);
 
-    if (!code || phoneSuffix.length < 4) {
-      res.status(400).json({
-        error: 'Masukkan kode pesanan (contoh: DJ-1001) dan 4 digit terakhir nomor HP.',
+    const order = db.orders.find((o) => o.orderNumber.toUpperCase() === orderNumber);
+    if (!order) {
+      res.status(404).json({error: 'Pesanan tidak ditemukan.'});
+      return;
+    }
+
+    const ownsByToken = loggedInCustomer && doesCustomerOwnOrder(loggedInCustomer, order);
+    const ownsByPhone =
+      phoneLast4.length === 4 && order.phone.replace(/\D/g, '').endsWith(phoneLast4);
+    if (!ownsByToken && !ownsByPhone) {
+      res.status(403).json({
+        error: 'Verifikasi pelanggan tidak cocok. Masukkan 4 digit akhir nomor HP pemesan.',
       });
       return;
     }
 
+    if (order.paymentMethod !== 'QRIS' || !order.qris) {
+      res.status(400).json({error: 'Pesanan ini tidak menggunakan pembayaran QRIS.'});
+      return;
+    }
+
+    if (order.qris.gatewayStatus === 'PAID' || order.paymentStatus === 'LUNAS') {
+      res.json({order: sanitizeOrderForPublic(order)});
+      return;
+    }
+
+    const now = new Date().toISOString();
+    if (Date.now() > new Date(order.qris.expiresAt).getTime()) {
+      order.qris.gatewayStatus = 'EXPIRED';
+      saveDatabase(db);
+      res.status(410).json({error: 'QRIS telah kedaluwarsa. Silakan buat pesanan baru atau bayar di tempat.'});
+      return;
+    }
+
+    order.qris.gatewayStatus = 'PAID';
+    order.qris.paidAt = now;
+    order.paymentStatus = 'LUNAS';
+    order.updatedAt = now;
+
+    if (!db.ledger.some((l) => l.description.includes(`#${order.orderNumber}`))) {
+      db.ledger.unshift({
+        id: `ldg-${crypto.randomUUID().slice(0, 8)}`,
+        type: 'MASUK',
+        category: order.deliveryMethod === 'cod' ? 'Penjualan COD (QRIS)' : 'Penjualan QRIS',
+        description: `Pembayaran QRIS #${order.orderNumber} (${order.customerName})`,
+        amount: order.total,
+        paymentMethod: 'QRIS',
+        actorName: 'Payment Gateway QRIS',
+        createdAt: now,
+      });
+    }
+
+    appendWhatsappNotification(order, 'QRIS_LUNAS', 'Sistem QRIS Otomatis');
+    recordAuditLog(
+      db,
+      {id: 'gateway-qris', displayName: 'Payment Gateway QRIS', role: 'SISTEM'},
+      'QRIS_LUNAS',
+      order.orderNumber,
+      `Pembayaran QRIS otomatis Rp ${order.total.toLocaleString('id-ID')} a/n ${order.customerName}`
+    );
+
+    saveDatabase(db);
+    res.json({order: sanitizeOrderForPublic(order)});
+  });
+
+  app.get('/api/public/orders/track', (req, res) => {
     const db = loadDatabase();
+    const code = String(req.query?.code || '').trim().toUpperCase();
+    const phoneSuffix = String(req.query?.phone || '')
+      .replace(/\D/g, '')
+      .slice(-4);
+    const loggedInCustomer = extractCustomerFromHeader(req, db);
+
+    if (!code) {
+      res.status(400).json({error: 'Masukkan kode pesanan (contoh: DJ-1001).'});
+      return;
+    }
+
     const order = db.orders.find((o) => {
+      if (o.orderNumber.toUpperCase() !== code) return false;
+      if (loggedInCustomer && doesCustomerOwnOrder(loggedInCustomer, o)) return true;
       const orderDigits = o.phone.replace(/\D/g, '');
-      return (
-        o.orderNumber.toUpperCase() === code && orderDigits.endsWith(phoneSuffix)
-      );
+      return phoneSuffix.length >= 4 && orderDigits.endsWith(phoneSuffix);
     });
 
     if (!order) {
@@ -527,39 +984,179 @@ async function startServer() {
       return;
     }
 
+    const complaints = db.complaints.filter((c) => c.orderId === order.id);
+
     res.json({
       storeCoords: db.settings.storeCoords || null,
-      order: {
-        orderNumber: order.orderNumber,
-        customerName: order.customerName,
-        deliveryMethod: order.deliveryMethod,
-        paymentMethod: order.paymentMethod,
-        addressNote: order.addressNote,
-        notes: order.notes,
-        status: order.status,
-        items: order.items.map((i) => ({
-          productName: i.productName,
-          variantLabel: i.variantLabel,
-          quantity: i.quantity,
-          unitPrice: i.unitPrice,
-        })),
-        subtotal: order.subtotal,
-        deliveryFee: order.deliveryFee,
-        total: order.total,
-        handledBy: order.handledBy,
-        courierName: order.courierName,
-        customerCoords: order.customerCoords || null,
-        tracking: order.tracking,
-        createdAt: order.createdAt,
-        updatedAt: order.updatedAt,
-      },
+      order: sanitizeOrderForPublic(order),
+      complaints,
     });
+  });
+
+  // Public order cancellation (only while status is MENUNGGU)
+  app.post('/api/public/orders/:orderNumber/cancel', (req, res) => {
+    const db = loadDatabase();
+    const orderNumber = String(req.params.orderNumber || '').trim().toUpperCase();
+    const loggedInCustomer = extractCustomerFromHeader(req, db);
+    const phoneLast4 = String(req.body?.phoneLast4 || '')
+      .replace(/\D/g, '')
+      .slice(-4);
+
+    const order = db.orders.find((o) => o.orderNumber.toUpperCase() === orderNumber);
+    if (!order) {
+      res.status(404).json({error: 'Pesanan tidak ditemukan.'});
+      return;
+    }
+
+    const ownsByToken = loggedInCustomer && doesCustomerOwnOrder(loggedInCustomer, order);
+    const ownsByPhone =
+      phoneLast4.length === 4 && order.phone.replace(/\D/g, '').endsWith(phoneLast4);
+    if (!ownsByToken && !ownsByPhone) {
+      res.status(403).json({
+        error: 'Verifikasi pemilik pesanan gagal. Masukkan 4 digit akhir nomor HP pemesan.',
+      });
+      return;
+    }
+
+    if (order.status !== 'MENUNGGU') {
+      res.status(409).json({
+        error: 'Pesanan yang sudah disiapkan atau dalam pengantaran tidak dapat dibatalkan mandiri. Hubungi toko.',
+      });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    order.status = 'DIBATALKAN';
+    order.updatedAt = now;
+    if (req.body?.reason) {
+      order.notes = [order.notes, `Batal pelanggan: ${String(req.body.reason).trim()}`]
+        .filter(Boolean)
+        .join(' · ');
+    }
+
+    for (const item of order.items) {
+      const product = db.products.find((p) => p.id === item.productId);
+      const variant = product?.variants.find((v) => v.id === item.variantId);
+      if (product && variant) {
+        variant.stock += item.quantity;
+        syncProductAvailability(product);
+        db.stockMovements.unshift({
+          id: `stk-${crypto.randomUUID().slice(0, 8)}`,
+          productId: product.id,
+          productName: product.name,
+          variantId: variant.id,
+          variantLabel: variant.label,
+          type: 'MASUK',
+          quantityDelta: item.quantity,
+          note: `Pembatalan mandiri pelanggan #${order.orderNumber}`,
+          actorName: order.customerName,
+          createdAt: now,
+        });
+      }
+    }
+
+    recordAuditLog(
+      db,
+      {
+        id: loggedInCustomer?.id || 'customer-guest',
+        displayName: order.customerName,
+        role: 'PELANGGAN',
+      },
+      'BATAL_PESANAN',
+      order.orderNumber,
+      `Pelanggan membatalkan pesanan #${order.orderNumber}`
+    );
+    saveDatabase(db);
+    res.json({order: sanitizeOrderForPublic(order)});
+  });
+
+  // Public complaint submission (verified by customer token or orderNumber + phoneLast4)
+  app.post('/api/public/complaints', (req, res) => {
+    const db = loadDatabase();
+    const loggedInCustomer = extractCustomerFromHeader(req, db);
+
+    const orderNumber = String(req.body?.orderNumber || '').trim().toUpperCase();
+    const phoneLast4 = String(req.body?.phoneLast4 || '')
+      .replace(/\D/g, '')
+      .slice(-4);
+    const category = req.body?.category as ComplaintCategory;
+    const requestedResolution = req.body?.requestedResolution as ComplaintResolution;
+    const description = String(req.body?.description || '').trim();
+    const evidencePhoto = isValidUploadedPhoto(req.body?.evidencePhoto)
+      ? req.body.evidencePhoto.trim()
+      : undefined;
+
+    if (
+      !orderNumber ||
+      !VALID_COMPLAINT_CATEGORIES.includes(category) ||
+      !VALID_COMPLAINT_RESOLUTIONS.includes(requestedResolution) ||
+      description.length < 8
+    ) {
+      res.status(400).json({
+        error: 'Lengkapi kode pesanan, kategori kendala, solusi yang diinginkan, dan keterangan (min. 8 karakter).',
+      });
+      return;
+    }
+
+    const order = db.orders.find((o) => o.orderNumber.toUpperCase() === orderNumber);
+    if (!order) {
+      res.status(404).json({error: 'Pesanan tidak ditemukan.'});
+      return;
+    }
+
+    const ownsByToken = loggedInCustomer && doesCustomerOwnOrder(loggedInCustomer, order);
+    const ownsByPhone =
+      phoneLast4.length === 4 && order.phone.replace(/\D/g, '').endsWith(phoneLast4);
+    if (!ownsByToken && !ownsByPhone) {
+      res.status(403).json({
+        error: 'Verifikasi pemilik pesanan gagal. Pastikan 4 digit akhir nomor HP sesuai.',
+      });
+      return;
+    }
+
+    db.complaintSeq += 1;
+    const now = new Date().toISOString();
+    const complaint: ComplaintRecord = {
+      id: `cmp-${crypto.randomUUID().slice(0, 8)}`,
+      complaintNumber: `KMP-${db.complaintSeq}`,
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      customerId: loggedInCustomer?.id ?? order.customerId ?? null,
+      customerName: order.customerName,
+      phone: order.phone,
+      category,
+      description,
+      evidencePhoto,
+      requestedResolution,
+      status: 'BARU',
+      staffResponse: '',
+      handledBy: '',
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    db.complaints.unshift(complaint);
+    recordAuditLog(
+      db,
+      {
+        id: loggedInCustomer?.id || 'customer-guest',
+        displayName: order.customerName,
+        role: 'PELANGGAN',
+      },
+      'AJUKAN_KOMPLAIN',
+      complaint.complaintNumber,
+      `Komplain untuk #${order.orderNumber}: ${category}`
+    );
+    saveDatabase(db);
+
+    res.status(201).json({complaint});
   });
 
   // --- PROTECTED OPERATIONAL ROUTES ---
   app.get('/api/ops/bootstrap', requireAuth, (req: AuthenticatedRequest, res) => {
     const db = loadDatabase();
     const role = req.user!.role;
+    const isLeadership = role === 'PEMILIK' || role === 'DIREKTUR';
 
     const totalRevenue = db.ledger
       .filter((l) => l.type === 'MASUK')
@@ -567,6 +1164,18 @@ async function startServer() {
     const totalExpense = db.ledger
       .filter((l) => l.type === 'KELUAR')
       .reduce((sum, l) => sum + l.amount, 0);
+
+    // Gross profit estimate across completed orders
+    const estimatedProfit = db.orders
+      .filter((o) => o.status === 'SELESAI')
+      .reduce((orderSum, ord) => {
+        const orderGross = ord.items.reduce(
+          (itemSum, i) => itemSum + (i.unitPrice - (i.costPrice || 0)) * i.quantity,
+          0
+        );
+        return orderSum + orderGross - (ord.discountAmount || 0);
+      }, 0);
+
     const pendingOrdersCount = db.orders.filter(
       (o) => o.status === 'MENUNGGU' || o.status === 'DISIAPKAN'
     ).length;
@@ -574,8 +1183,7 @@ async function startServer() {
       (o) => o.deliveryMethod === 'cod' && o.status === 'DIANTAR'
     ).length;
     const lowStockCount = db.products.reduce(
-      (count, p) =>
-        count + p.variants.filter((v) => v.stock <= v.minStock).length,
+      (count, p) => count + p.variants.filter((v) => v.stock <= v.minStock).length,
       0
     );
     const totalKasbonOutstanding = db.kasbon.reduce(
@@ -585,18 +1193,22 @@ async function startServer() {
     const pendingSupplierDeliveriesCount = db.supplierDeliveries.filter(
       (d) => d.status === 'MENUNGGU_TERIMA'
     ).length;
+    const pendingComplaintsCount = db.complaints.filter(
+      (c) => c.status === 'BARU' || c.status === 'DIPROSES'
+    ).length;
+    const openShiftsCount = db.shifts.filter((s) => s.status === 'TERBUKA').length;
 
-    const canSeeFinancialOverview = role === 'PEMILIK' || role === 'KEUANGAN';
+    const canSeeFinancialOverview = isLeadership || role === 'KEUANGAN';
 
     let scopedProducts: Product[] = [];
-    if (role === 'PEMILIK' || role === 'GUDANG') {
+    if (isLeadership || role === 'GUDANG') {
       scopedProducts = db.products;
     } else if (role === 'KASIR' || role === 'PEMASOK') {
       scopedProducts = db.products.map(sanitizeProductForPublic);
     }
 
     let scopedOrders: Order[] = [];
-    if (role === 'PEMILIK') {
+    if (isLeadership) {
       scopedOrders = db.orders;
     } else if (role === 'KASIR') {
       scopedOrders = db.orders.map(sanitizeOrderItemsForRole);
@@ -611,12 +1223,22 @@ async function startServer() {
     }
 
     let scopedSupplierDeliveries: SupplierDelivery[] = [];
-    if (role === 'PEMILIK' || role === 'GUDANG') {
+    if (isLeadership || role === 'GUDANG' || role === 'KEUANGAN') {
       scopedSupplierDeliveries = db.supplierDeliveries;
     } else if (role === 'PEMASOK') {
       scopedSupplierDeliveries = db.supplierDeliveries
         .filter((d) => d.supplierId === req.user!.id)
         .map((d) => ({...d}));
+    }
+
+    let scopedComplaints: ComplaintRecord[] = [];
+    if (isLeadership || role === 'KASIR' || role === 'GUDANG') {
+      scopedComplaints = db.complaints;
+    }
+
+    let scopedShifts: CashierShift[] = [];
+    if (isLeadership || role === 'KASIR' || role === 'KEUANGAN') {
+      scopedShifts = db.shifts.slice(0, 30);
     }
 
     res.json({
@@ -626,59 +1248,65 @@ async function startServer() {
         totalRevenue: canSeeFinancialOverview ? totalRevenue : 0,
         totalExpense: canSeeFinancialOverview ? totalExpense : 0,
         netCash: canSeeFinancialOverview ? totalRevenue - totalExpense : 0,
+        estimatedProfit: isLeadership ? estimatedProfit : 0,
         pendingOrdersCount:
-          role === 'PEMILIK' || role === 'KASIR' || role === 'GUDANG'
-            ? pendingOrdersCount
-            : 0,
-        activeDeliveriesCount:
-          role === 'PEMILIK' || role === 'KURIR' ? activeDeliveriesCount : 0,
+          isLeadership || role === 'KASIR' || role === 'GUDANG' ? pendingOrdersCount : 0,
+        activeDeliveriesCount: isLeadership || role === 'KURIR' ? activeDeliveriesCount : 0,
         lowStockCount:
-          role === 'PEMILIK' || role === 'GUDANG' || role === 'PEMASOK'
-            ? lowStockCount
-            : 0,
-        totalKasbonOutstanding: canSeeFinancialOverview
-          ? totalKasbonOutstanding
-          : 0,
-        totalOrders:
-          role === 'PEMILIK' || role === 'KASIR' ? db.orders.length : 0,
+          isLeadership || role === 'GUDANG' || role === 'PEMASOK' ? lowStockCount : 0,
+        totalKasbonOutstanding: canSeeFinancialOverview ? totalKasbonOutstanding : 0,
+        totalOrders: isLeadership || role === 'KASIR' ? db.orders.length : 0,
         pendingSupplierDeliveriesCount:
-          role === 'PEMILIK' || role === 'GUDANG' || role === 'PEMASOK'
+          isLeadership || role === 'GUDANG' || role === 'PEMASOK'
             ? pendingSupplierDeliveriesCount
             : 0,
+        pendingComplaintsCount:
+          isLeadership || role === 'KASIR' || role === 'GUDANG' ? pendingComplaintsCount : 0,
+        openShiftsCount: isLeadership || role === 'KASIR' ? openShiftsCount : 0,
       },
       products: scopedProducts,
       orders: scopedOrders,
-      stockMovements:
-        role === 'PEMILIK' || role === 'GUDANG'
-          ? db.stockMovements.slice(0, 60)
-          : [],
-      ledger: canSeeFinancialOverview ? db.ledger.slice(0, 80) : [],
-      kasbon:
-        role === 'PEMILIK' || role === 'KEUANGAN' || role === 'KASIR'
-          ? db.kasbon
-          : [],
+      stockMovements: isLeadership || role === 'GUDANG' ? db.stockMovements.slice(0, 80) : [],
+      ledger: canSeeFinancialOverview ? db.ledger.slice(0, 120) : [],
+      kasbon: isLeadership || role === 'KEUANGAN' || role === 'KASIR' ? db.kasbon : [],
       supplierDeliveries: scopedSupplierDeliveries,
-      staff:
-        role === 'PEMILIK'
-          ? db.staff.map((s) => ({
-              id: s.id,
-              username: s.username,
-              displayName: s.displayName,
-              role: s.role,
-              active: s.active,
-              createdAt: s.createdAt,
-            }))
+      complaints: scopedComplaints,
+      shifts: scopedShifts,
+      auditLogs: isLeadership ? db.auditLogs.slice(0, 80) : [],
+      couriers:
+        isLeadership || role === 'KASIR' || role === 'KURIR'
+          ? db.staff
+              .filter((s) => s.active && s.role === 'KURIR')
+              .map((s) => ({
+                id: s.id,
+                username: s.username,
+                displayName: s.displayName,
+                role: s.role,
+                active: s.active,
+                createdAt: s.createdAt,
+              }))
           : [],
+      staff: isLeadership
+        ? db.staff.map((s) => ({
+            id: s.id,
+            username: s.username,
+            displayName: s.displayName,
+            role: s.role,
+            active: s.active,
+            createdAt: s.createdAt,
+          }))
+        : [],
     });
   });
 
-  // Pemilik: Update Store Settings
+  // Pemilik & Direktur: Update Store Settings (Merchant QRIS reserved to PEMILIK)
   app.patch(
     '/api/ops/settings',
     requireAuth,
-    requireRoles(['PEMILIK']),
-    (req, res) => {
+    requireRoles(['PEMILIK', 'DIREKTUR']),
+    (req: AuthenticatedRequest, res) => {
       const db = loadDatabase();
+      const isOwner = req.user!.role === 'PEMILIK';
       const hours = String(req.body?.hours || db.settings.hours).trim();
       const daysOpen = String(req.body?.daysOpen || db.settings.daysOpen).trim();
       const deliveryArea = String(
@@ -689,7 +1317,17 @@ async function startServer() {
         0,
         Number(req.body?.freeDeliveryMin ?? db.settings.freeDeliveryMin)
       );
+      const whatsappNumber = String(
+        req.body?.whatsappNumber ?? db.settings.whatsappNumber ?? '6281279008899'
+      ).trim();
       const parsedCoords = parseGeoPoint(req.body?.storeCoords);
+
+      const qrisMerchantName = isOwner
+        ? String(req.body?.qrisMerchantName ?? db.settings.qrisMerchantName ?? 'TOKO DIMAS JAYA').trim()
+        : db.settings.qrisMerchantName;
+      const qrisNmid = isOwner
+        ? String(req.body?.qrisNmid ?? db.settings.qrisNmid ?? 'ID1020260000188').trim()
+        : db.settings.qrisNmid;
 
       db.settings = {
         ...db.settings,
@@ -700,22 +1338,32 @@ async function startServer() {
         freeDeliveryMin: Number.isFinite(freeDeliveryMin)
           ? freeDeliveryMin
           : db.settings.freeDeliveryMin,
+        whatsappNumber,
+        qrisMerchantName,
+        qrisNmid,
         storeCoords:
           req.body?.storeCoords === null
             ? null
             : parsedCoords ?? db.settings.storeCoords ?? null,
       };
+      recordAuditLog(
+        db,
+        req.user!,
+        'UBAH_PENGATURAN',
+        'StoreSettings',
+        `Perbarui jam buka / ongkir / koordinat / WA toko`
+      );
       saveDatabase(db);
       res.json({settings: db.settings});
     }
   );
 
-  // Pemilik: Staff & Division Management
+  // Pemilik & Direktur: Staff & Division Management (with strict hierarchical boundaries)
   app.post(
     '/api/ops/staff',
     requireAuth,
-    requireRoles(['PEMILIK']),
-    (req, res) => {
+    requireRoles(['PEMILIK', 'DIREKTUR']),
+    (req: AuthenticatedRequest, res) => {
       const displayName = String(req.body?.displayName || '').trim();
       const username = String(req.body?.username || '')
         .trim()
@@ -737,6 +1385,14 @@ async function startServer() {
         return;
       }
 
+      if (req.user!.role === 'DIREKTUR' && !DIRECTOR_MANAGED_ROLES.includes(role)) {
+        res.status(403).json({
+          error:
+            'Direktur hanya dapat membuat akun staf divisi di bawahnya (Kasir, Gudang, Pemasok, Kurir, Keuangan).',
+        });
+        return;
+      }
+
       const db = loadDatabase();
       if (db.staff.some((s) => s.username.toLowerCase() === username)) {
         res.status(409).json({error: 'Username sudah dipakai oleh staf lain.'});
@@ -754,6 +1410,13 @@ async function startServer() {
       };
 
       db.staff.push(newStaff);
+      recordAuditLog(
+        db,
+        req.user!,
+        'TAMBAH_STAF',
+        newStaff.username,
+        `Tambah akun ${newStaff.displayName} (${newStaff.role})`
+      );
       saveDatabase(db);
 
       res.status(201).json({
@@ -772,7 +1435,7 @@ async function startServer() {
   app.patch(
     '/api/ops/staff/:id',
     requireAuth,
-    requireRoles(['PEMILIK']),
+    requireRoles(['PEMILIK', 'DIREKTUR']),
     (req: AuthenticatedRequest, res) => {
       const db = loadDatabase();
       const target = db.staff.find((s) => s.id === req.params.id);
@@ -781,24 +1444,76 @@ async function startServer() {
         return;
       }
 
+      if (req.user!.role === 'DIREKTUR' && !DIRECTOR_MANAGED_ROLES.includes(target.role)) {
+        res.status(403).json({
+          error: 'Direktur tidak memiliki izin mengubah akun Pemilik atau sesama Direktur.',
+        });
+        return;
+      }
+
       if (typeof req.body?.active === 'boolean') {
         if (target.id === req.user!.id && !req.body.active) {
           res
             .status(400)
-            .json({error: 'Tidak dapat menonaktifkan akun Pemilik yang sedang aktif.'});
+            .json({error: 'Tidak dapat menonaktifkan akun Anda yang sedang aktif.'});
           return;
         }
         target.active = req.body.active;
       }
 
       if (req.body?.role && VALID_ROLES.includes(req.body.role)) {
+        if (
+          req.user!.role === 'DIREKTUR' &&
+          !DIRECTOR_MANAGED_ROLES.includes(req.body.role)
+        ) {
+          res.status(403).json({
+            error: 'Direktur tidak dapat menaikkan jabatan menjadi Direktur atau Pemilik.',
+          });
+          return;
+        }
         target.role = req.body.role;
+      }
+
+      if (typeof req.body?.displayName === 'string') {
+        const nextName = req.body.displayName.trim();
+        if (nextName.length < 2) {
+          res.status(400).json({error: 'Nama staf minimal 2 karakter.'});
+          return;
+        }
+        target.displayName = nextName;
+      }
+
+      if (typeof req.body?.username === 'string') {
+        const nextUsername = req.body.username
+          .trim()
+          .toLowerCase()
+          .replace(/[^a-z0-9._-]/g, '');
+        if (nextUsername.length < 3) {
+          res.status(400).json({error: 'Username staf minimal 3 karakter.'});
+          return;
+        }
+        if (
+          db.staff.some(
+            (s) => s.id !== target.id && s.username.toLowerCase() === nextUsername
+          )
+        ) {
+          res.status(409).json({error: 'Username sudah dipakai oleh staf lain.'});
+          return;
+        }
+        target.username = nextUsername;
       }
 
       if (typeof req.body?.passcode === 'string' && req.body.passcode.length >= 6) {
         target.passcodeHash = hashPasscode(req.body.passcode);
       }
 
+      recordAuditLog(
+        db,
+        req.user!,
+        'UBAH_STAF',
+        target.username,
+        `Update akun ${target.displayName} (${target.role}, aktif=${target.active})`
+      );
       saveDatabase(db);
       res.json({
         staff: {
@@ -813,11 +1528,53 @@ async function startServer() {
     }
   );
 
-  // Kasir & Pemilik: Point of Sale (Transaksi Langsung di Toko)
+  app.delete(
+    '/api/ops/staff/:id',
+    requireAuth,
+    requireRoles(['PEMILIK', 'DIREKTUR']),
+    (req: AuthenticatedRequest, res) => {
+      const db = loadDatabase();
+      const idx = db.staff.findIndex((s) => s.id === req.params.id);
+      if (idx === -1) {
+        res.status(404).json({error: 'Akun staf tidak ditemukan.'});
+        return;
+      }
+      const target = db.staff[idx];
+      if (target.id === req.user!.id) {
+        res.status(400).json({error: 'Tidak dapat menghapus akun yang sedang aktif dipakai.'});
+        return;
+      }
+      if (req.user!.role === 'DIREKTUR' && !DIRECTOR_MANAGED_ROLES.includes(target.role)) {
+        res.status(403).json({
+          error: 'Direktur tidak dapat menghapus akun Pemilik atau sesama Direktur.',
+        });
+        return;
+      }
+      if (
+        target.role === 'PEMILIK' &&
+        db.staff.filter((s) => s.role === 'PEMILIK' && s.active).length <= 1
+      ) {
+        res.status(400).json({error: 'Minimal satu akun Pemilik aktif harus tetap tersedia.'});
+        return;
+      }
+      const [removed] = db.staff.splice(idx, 1);
+      recordAuditLog(
+        db,
+        req.user!,
+        'HAPUS_STAF',
+        removed.username,
+        `Hapus akun ${removed.displayName} (${removed.role})`
+      );
+      saveDatabase(db);
+      res.json({deletedId: removed.id});
+    }
+  );
+
+  // Kasir, Direktur & Pemilik: Point of Sale (with discount, dynamic QRIS & shift tracking)
   app.post(
     '/api/ops/pos',
     requireAuth,
-    requireRoles(['PEMILIK', 'KASIR']),
+    requireRoles(['PEMILIK', 'DIREKTUR', 'KASIR']),
     (req: AuthenticatedRequest, res) => {
       const customerName = String(req.body?.customerName || 'Pembeli Toko').trim();
       const phone = String(req.body?.phone || '-').trim();
@@ -876,6 +1633,14 @@ async function startServer() {
         });
       }
 
+      const subtotal = verifiedItems.reduce(
+        (sum, item) => sum + item.unitPrice * item.quantity,
+        0
+      );
+      const rawDiscount = Math.max(0, Math.round(Number(req.body?.discountAmount || 0)));
+      const discountAmount = Math.min(subtotal, Number.isFinite(rawDiscount) ? rawDiscount : 0);
+      const total = Math.max(0, subtotal - discountAmount);
+
       const now = new Date().toISOString();
       for (const item of verifiedItems) {
         const product = db.products.find((p) => p.id === item.productId)!;
@@ -898,10 +1663,17 @@ async function startServer() {
 
       db.orderSeq += 1;
       const orderNumber = `DJ-${db.orderSeq}`;
-      const total = verifiedItems.reduce(
-        (sum, item) => sum + item.unitPrice * item.quantity,
-        0
-      );
+      const qris =
+        paymentMethod === 'QRIS'
+          ? buildOrderQrisInfo({
+              orderNumber,
+              amount: Math.max(100, total),
+              merchantName: db.settings.qrisMerchantName,
+              nmid: db.settings.qrisNmid,
+              gatewayStatus: 'PAID',
+              nowIso: now,
+            })
+          : undefined;
 
       const posOrder: Order = {
         id: `ord-${crypto.randomUUID().slice(0, 8)}`,
@@ -913,9 +1685,12 @@ async function startServer() {
         addressNote: 'Belanja langsung di Toko Dimas Jaya',
         notes,
         paymentMethod,
+        paymentStatus: paymentMethod === 'KASBON' ? 'KASBON' : 'LUNAS',
+        qris,
+        discountAmount,
         status: 'SELESAI',
         items: verifiedItems,
-        subtotal: total,
+        subtotal,
         deliveryFee: 0,
         total,
         handledBy: req.user!.displayName,
@@ -948,6 +1723,18 @@ async function startServer() {
           actorName: req.user!.displayName,
           createdAt: now,
         });
+
+        // Update currently open shift
+        const activeShift =
+          db.shifts.find((s) => s.status === 'TERBUKA' && s.cashierId === req.user!.id) ||
+          db.shifts.find((s) => s.status === 'TERBUKA');
+        if (activeShift) {
+          if (paymentMethod === 'QRIS') {
+            activeShift.qrisSalesTotal += total;
+          } else {
+            activeShift.expectedCash += total;
+          }
+        }
       }
 
       saveDatabase(db);
@@ -955,11 +1742,85 @@ async function startServer() {
     }
   );
 
-  // Order status progression (strict per-role workflow guards)
+  // Cashier Shift Open / Close
+  app.post(
+    '/api/ops/shifts/open',
+    requireAuth,
+    requireRoles(['PEMILIK', 'DIREKTUR', 'KASIR']),
+    (req: AuthenticatedRequest, res) => {
+      const openingCash = Math.max(0, Math.round(Number(req.body?.openingCash || 0)));
+      const note = String(req.body?.note || '').trim();
+      const db = loadDatabase();
+
+      if (db.shifts.some((s) => s.status === 'TERBUKA')) {
+        res.status(409).json({
+          error: 'Masih ada shift kasir yang terbuka. Tutup shift sebelumnya terlebih dahulu.',
+        });
+        return;
+      }
+
+      const shift: CashierShift = {
+        id: `shf-${crypto.randomUUID().slice(0, 8)}`,
+        cashierId: req.user!.id,
+        cashierName: req.user!.displayName,
+        openedAt: new Date().toISOString(),
+        openingCash,
+        expectedCash: openingCash,
+        qrisSalesTotal: 0,
+        note: note || 'Buka laci kasir',
+        status: 'TERBUKA',
+      };
+
+      db.shifts.unshift(shift);
+      recordAuditLog(
+        db,
+        req.user!,
+        'BUKA_SHIFT',
+        shift.id,
+        `Modal awal laci Rp ${openingCash.toLocaleString('id-ID')}`
+      );
+      saveDatabase(db);
+      res.status(201).json({shift});
+    }
+  );
+
+  app.post(
+    '/api/ops/shifts/close',
+    requireAuth,
+    requireRoles(['PEMILIK', 'DIREKTUR', 'KASIR']),
+    (req: AuthenticatedRequest, res) => {
+      const db = loadDatabase();
+      const shift = db.shifts.find((s) => s.status === 'TERBUKA');
+      if (!shift) {
+        res.status(404).json({error: 'Tidak ada shift kasir yang sedang terbuka.'});
+        return;
+      }
+      const countedCash = Math.max(0, Math.round(Number(req.body?.countedCash ?? shift.expectedCash)));
+      const note = String(req.body?.note || '').trim();
+
+      shift.countedCash = countedCash;
+      shift.discrepancy = countedCash - shift.expectedCash;
+      shift.closedAt = new Date().toISOString();
+      shift.status = 'DITUTUP';
+      if (note) shift.note = `${shift.note} · Tutup: ${note}`;
+
+      recordAuditLog(
+        db,
+        req.user!,
+        'TUTUP_SHIFT',
+        shift.id,
+        `Fisik laci Rp ${countedCash.toLocaleString('id-ID')} (selisih ${shift.discrepancy})`
+      );
+      saveDatabase(db);
+      res.json({shift});
+    }
+  );
+
+  // Order status progression (strict per-role workflow guards + auto WA notification on DIANTAR)
   app.patch(
     '/api/ops/orders/:id/status',
     requireAuth,
-    requireRoles(['PEMILIK', 'KASIR', 'GUDANG', 'KURIR']),
+    requireRoles(['PEMILIK', 'DIREKTUR', 'KASIR', 'GUDANG', 'KURIR']),
     (req: AuthenticatedRequest, res) => {
       const nextStatus = req.body?.status as OrderStatus;
       const validStatuses: OrderStatus[] = [
@@ -1052,12 +1913,18 @@ async function startServer() {
             courierCoords: order.tracking?.courierCoords ?? db.settings.storeCoords ?? null,
             updatedAt: now,
           };
+          appendWhatsappNotification(order, 'DIANTAR', req.user!.displayName);
         } else if (nextStatus === 'SELESAI') {
+          const uploadedProofPhoto = isValidUploadedPhoto(req.body?.proofPhoto)
+            ? req.body.proofPhoto.trim()
+            : order.tracking?.proofPhoto;
           order.tracking = {
             checkpoint: 'SUDAH_TIBA',
             locationNote: 'Kurir sudah tiba & pesanan COD selesai diserahkan',
             progressPercent: 100,
             etaMinutes: 0,
+            proofNote: String(req.body?.proofNote || order.tracking?.proofNote || '').trim() || undefined,
+            proofPhoto: uploadedProofPhoto,
             courierCoords:
               order.customerCoords ??
               order.tracking?.courierCoords ??
@@ -1068,7 +1935,6 @@ async function startServer() {
         }
       }
 
-      // Restore stock if cancelled from an active status
       if (nextStatus === 'DIBATALKAN' && prevStatus !== 'DIBATALKAN') {
         for (const item of order.items) {
           const product = db.products.find((p) => p.id === item.productId);
@@ -1092,8 +1958,12 @@ async function startServer() {
         }
       }
 
-      // Record income in ledger when online/COD order completes
       if (nextStatus === 'SELESAI' && prevStatus !== 'SELESAI') {
+        order.paymentStatus = 'LUNAS';
+        if (order.qris && order.qris.gatewayStatus === 'PENDING') {
+          order.qris.gatewayStatus = 'PAID';
+          order.qris.paidAt = now;
+        }
         const alreadyLogged = db.ledger.some((l) =>
           l.description.includes(`#${order.orderNumber}`)
         );
@@ -1109,6 +1979,10 @@ async function startServer() {
             createdAt: now,
           });
         }
+        const activeShift = db.shifts.find((s) => s.status === 'TERBUKA');
+        if (activeShift && order.paymentMethod !== 'QRIS') {
+          activeShift.expectedCash += order.total;
+        }
       }
 
       saveDatabase(db);
@@ -1116,11 +1990,135 @@ async function startServer() {
     }
   );
 
-  // Kurir & Pemilik: Update Live Courier Tracking & Map Position
+  // Confirm Online QRIS payment from Ops Portal
+  app.patch(
+    '/api/ops/orders/:id/qris-confirm',
+    requireAuth,
+    requireRoles(['PEMILIK', 'DIREKTUR', 'KASIR', 'KEUANGAN']),
+    (req: AuthenticatedRequest, res) => {
+      const db = loadDatabase();
+      const order = db.orders.find((o) => o.id === req.params.id);
+      if (!order) {
+        res.status(404).json({error: 'Pesanan tidak ditemukan.'});
+        return;
+      }
+      if (order.paymentMethod !== 'QRIS') {
+        res.status(400).json({error: 'Pesanan ini tidak memakai QRIS.'});
+        return;
+      }
+      const now = new Date().toISOString();
+      order.paymentStatus = 'LUNAS';
+      if (order.qris) {
+        order.qris.gatewayStatus = 'PAID';
+        order.qris.paidAt = now;
+      }
+      order.updatedAt = now;
+
+      if (!db.ledger.some((l) => l.description.includes(`#${order.orderNumber}`))) {
+        db.ledger.unshift({
+          id: `ldg-${crypto.randomUUID().slice(0, 8)}`,
+          type: 'MASUK',
+          category: 'Penjualan QRIS',
+          description: `Verifikasi QRIS #${order.orderNumber} (${order.customerName})`,
+          amount: order.total,
+          paymentMethod: 'QRIS',
+          actorName: req.user!.displayName,
+          createdAt: now,
+        });
+      }
+
+      appendWhatsappNotification(order, 'QRIS_LUNAS', req.user!.displayName);
+      recordAuditLog(
+        db,
+        req.user!,
+        'KONFIRMASI_QRIS',
+        order.orderNumber,
+        `Verifikasi QRIS Rp ${order.total.toLocaleString('id-ID')}`
+      );
+      saveDatabase(db);
+      res.json({order});
+    }
+  );
+
+  // Send / log WhatsApp dispatch notification
+  app.post(
+    '/api/ops/orders/:id/whatsapp',
+    requireAuth,
+    requireRoles(['PEMILIK', 'DIREKTUR', 'KURIR', 'KASIR']),
+    (req: AuthenticatedRequest, res) => {
+      const db = loadDatabase();
+      const order = db.orders.find((o) => o.id === req.params.id);
+      if (!order) {
+        res.status(404).json({error: 'Pesanan tidak ditemukan.'});
+        return;
+      }
+      const trigger = (
+        ['DISIAPKAN', 'DIANTAR', 'SELESAI', 'QRIS_LUNAS'].includes(req.body?.trigger)
+          ? req.body.trigger
+          : 'DIANTAR'
+      ) as WhatsappNotification['trigger'];
+
+      const notification = appendWhatsappNotification(order, trigger, req.user!.displayName);
+      order.updatedAt = new Date().toISOString();
+      saveDatabase(db);
+      res.status(201).json({notification, order});
+    }
+  );
+
+  // Assign courier to COD order
+  app.patch(
+    '/api/ops/orders/:id/assign-courier',
+    requireAuth,
+    requireRoles(['PEMILIK', 'DIREKTUR', 'KASIR']),
+    (req: AuthenticatedRequest, res) => {
+      const db = loadDatabase();
+      const order = db.orders.find((o) => o.id === req.params.id);
+      if (!order) {
+        res.status(404).json({error: 'Pesanan tidak ditemukan.'});
+        return;
+      }
+      if (order.deliveryMethod !== 'cod') {
+        res.status(400).json({error: 'Penugasan kurir hanya untuk pesanan COD.'});
+        return;
+      }
+      const courierId = String(req.body?.courierId || '').trim();
+      if (!courierId) {
+        order.assignedCourierId = undefined;
+        order.assignedCourierName = undefined;
+      } else {
+        const courier = db.staff.find(
+          (s) => s.id === courierId && s.active && s.role === 'KURIR'
+        );
+        if (!courier) {
+          res.status(404).json({error: 'Akun kurir aktif tidak ditemukan.'});
+          return;
+        }
+        order.assignedCourierId = courier.id;
+        order.assignedCourierName = courier.displayName;
+        if (!order.courierName) {
+          order.courierName = courier.displayName;
+        }
+      }
+      order.updatedAt = new Date().toISOString();
+      recordAuditLog(
+        db,
+        req.user!,
+        'TUGAS_KURIR',
+        order.orderNumber,
+        order.assignedCourierName
+          ? `Tugaskan kurir ${order.assignedCourierName}`
+          : 'Kosongkan penugasan kurir'
+      );
+      saveDatabase(db);
+      res.json({order});
+    }
+  );
+
+  // Kurir, Direktur & Pemilik: Update Live Courier Tracking & Map Position
   app.patch(
     '/api/ops/orders/:id/tracking',
     requireAuth,
-    requireRoles(['PEMILIK', 'KURIR']),
+    requireRoles(['PEMILIK', 'DIREKTUR', 'KURIR']),
     (req: AuthenticatedRequest, res) => {
       const db = loadDatabase();
       const order = db.orders.find((o) => o.id === req.params.id);
@@ -1165,11 +2163,12 @@ async function startServer() {
         String(req.body?.locationNote || '').trim() || defaultNotes[checkpoint];
 
       const rawEta = Number(req.body?.etaMinutes);
-      const etaMinutes = Number.isFinite(rawEta) && rawEta >= 0
-        ? Math.round(rawEta)
-        : checkpoint === 'SUDAH_TIBA'
-          ? 0
-          : order.tracking?.etaMinutes;
+      const etaMinutes =
+        Number.isFinite(rawEta) && rawEta >= 0
+          ? Math.round(rawEta)
+          : checkpoint === 'SUDAH_TIBA'
+            ? 0
+            : order.tracking?.etaMinutes;
 
       const parsedCourierCoords =
         req.body?.courierCoords === null
@@ -1178,9 +2177,15 @@ async function startServer() {
             order.tracking?.courierCoords ??
             null;
 
+      const uploadedProofPhoto = isValidUploadedPhoto(req.body?.proofPhoto)
+        ? req.body.proofPhoto.trim()
+        : order.tracking?.proofPhoto;
+
       const now = new Date().toISOString();
       order.courierName = order.courierName || req.user!.displayName;
       order.updatedAt = now;
+
+      let transitionedToDelivery = false;
       if (
         (checkpoint === 'MENUJU_LOKASI' ||
           checkpoint === 'DEKAT_TUJUAN' ||
@@ -1188,6 +2193,7 @@ async function startServer() {
         (order.status === 'MENUNGGU' || order.status === 'DISIAPKAN')
       ) {
         order.status = 'DIANTAR';
+        transitionedToDelivery = true;
       }
 
       order.tracking = {
@@ -1195,20 +2201,27 @@ async function startServer() {
         locationNote,
         progressPercent,
         etaMinutes,
+        proofNote:
+          String(req.body?.proofNote || order.tracking?.proofNote || '').trim() || undefined,
+        proofPhoto: uploadedProofPhoto,
         courierCoords: parsedCourierCoords,
         updatedAt: now,
       };
+
+      if (transitionedToDelivery) {
+        appendWhatsappNotification(order, 'DIANTAR', req.user!.displayName);
+      }
 
       saveDatabase(db);
       res.json({order});
     }
   );
 
-  // Gudang & Pemilik: Create Product
+  // Gudang, Direktur & Pemilik: Create Product
   app.post(
     '/api/ops/products',
     requireAuth,
-    requireRoles(['PEMILIK', 'GUDANG']),
+    requireRoles(['PEMILIK', 'DIREKTUR', 'GUDANG']),
     (req: AuthenticatedRequest, res) => {
       const name = String(req.body?.name || '').trim();
       const category = req.body?.category;
@@ -1218,6 +2231,11 @@ async function startServer() {
       const costPrice = Math.max(0, Math.round(Number(req.body?.costPrice || 0)));
       const stock = Math.max(0, Math.floor(Number(req.body?.stock || 0)));
       const minStock = Math.max(1, Math.floor(Number(req.body?.minStock || 5)));
+      const expiryDate = String(req.body?.expiryDate || '').trim() || undefined;
+      const sku = String(req.body?.sku || '').trim() || undefined;
+      const uploadedImage = isValidUploadedPhoto(req.body?.image)
+        ? req.body.image.trim()
+        : undefined;
 
       if (
         name.length < 2 ||
@@ -1252,16 +2270,18 @@ async function startServer() {
         availability: stock > 0 ? 'Stok Tersedia' : 'Stok Habis',
         description:
           description || `${name} tersedia segar setiap hari di Toko Dimas Jaya.`,
-        image: imageByCategory[category] || imageByCategory.Sembako,
+        image: uploadedImage || imageByCategory[category] || imageByCategory.Sembako,
         imageAlt: name,
         variants: [
           {
             id: variantId,
             label: variantLabel,
+            sku,
             price,
             costPrice: costPrice || Math.round(price * 0.85),
             stock,
             minStock,
+            expiryDate,
           },
         ],
       };
@@ -1284,17 +2304,95 @@ async function startServer() {
         });
       }
 
+      recordAuditLog(db, req.user!, 'TAMBAH_PRODUK', newProduct.name, `${variantLabel} Rp ${price}`);
       saveDatabase(db);
       res.status(201).json({product: newProduct});
     }
   );
 
-  // Gudang & Pemilik: Update Product Variant Price
+  // Edit product details
+  app.patch(
+    '/api/ops/products/:id',
+    requireAuth,
+    requireRoles(['PEMILIK', 'DIREKTUR', 'GUDANG']),
+    (req: AuthenticatedRequest, res) => {
+      const db = loadDatabase();
+      const product = db.products.find((p) => p.id === req.params.id);
+      if (!product) {
+        res.status(404).json({error: 'Produk tidak ditemukan.'});
+        return;
+      }
+      const nextName = String(req.body?.name || '').trim();
+      if (nextName.length >= 2) {
+        product.name = nextName;
+        product.imageAlt = nextName;
+      }
+      if (req.body?.category && VALID_CATEGORIES.includes(req.body.category)) {
+        product.category = req.body.category;
+      }
+      if (typeof req.body?.description === 'string' && req.body.description.trim()) {
+        product.description = req.body.description.trim();
+      }
+      if (isValidUploadedPhoto(req.body?.image)) {
+        product.image = req.body.image.trim();
+      }
+      syncProductAvailability(product);
+      recordAuditLog(db, req.user!, 'EDIT_PRODUK', product.name, `Update info produk`);
+      saveDatabase(db);
+      res.json({product});
+    }
+  );
+
+  // Add new variant to existing product
+  app.post(
+    '/api/ops/products/:id/variants',
+    requireAuth,
+    requireRoles(['PEMILIK', 'DIREKTUR', 'GUDANG']),
+    (req: AuthenticatedRequest, res) => {
+      const db = loadDatabase();
+      const product = db.products.find((p) => p.id === req.params.id);
+      if (!product) {
+        res.status(404).json({error: 'Produk tidak ditemukan.'});
+        return;
+      }
+      const label = String(req.body?.label || '').trim();
+      const sku = String(req.body?.sku || '').trim() || undefined;
+      const price = Math.max(500, Math.round(Number(req.body?.price || 0)));
+      const costPrice = Math.max(0, Math.round(Number(req.body?.costPrice || 0)));
+      const stock = Math.max(0, Math.floor(Number(req.body?.stock || 0)));
+      const minStock = Math.max(1, Math.floor(Number(req.body?.minStock || 5)));
+      const expiryDate = String(req.body?.expiryDate || '').trim() || undefined;
+
+      if (label.length < 1 || !Number.isFinite(price)) {
+        res.status(400).json({error: 'Nama kemasan dan harga jual wajib valid.'});
+        return;
+      }
+
+      const variantId = `var-${crypto.randomUUID().slice(0, 6)}`;
+      product.variants.push({
+        id: variantId,
+        label,
+        sku,
+        price,
+        costPrice: costPrice || Math.round(price * 0.85),
+        stock,
+        minStock,
+        expiryDate,
+      });
+      product.unitSummary = product.variants.map((v) => v.label).join(' · ');
+      syncProductAvailability(product);
+      recordAuditLog(db, req.user!, 'TAMBAH_VARIAN', product.name, `${label} Rp ${price}`);
+      saveDatabase(db);
+      res.status(201).json({product});
+    }
+  );
+
+  // Update Product Variant Price, Cost, MinStock, Expiry, SKU
   app.patch(
     '/api/ops/products/:id/variant/:variantId',
     requireAuth,
-    requireRoles(['PEMILIK', 'GUDANG']),
-    (req, res) => {
+    requireRoles(['PEMILIK', 'DIREKTUR', 'GUDANG']),
+    (req: AuthenticatedRequest, res) => {
       const db = loadDatabase();
       const product = db.products.find((p) => p.id === req.params.id);
       const variant = product?.variants.find((v) => v.id === req.params.variantId);
@@ -1303,6 +2401,13 @@ async function startServer() {
         return;
       }
 
+      if (req.body?.label && String(req.body.label).trim()) {
+        variant.label = String(req.body.label).trim();
+        product.unitSummary = product.variants.map((v) => v.label).join(' · ');
+      }
+      if (req.body?.sku !== undefined) {
+        variant.sku = String(req.body.sku || '').trim() || undefined;
+      }
       if (req.body?.price !== undefined) {
         const nextPrice = Math.round(Number(req.body.price));
         if (Number.isFinite(nextPrice) && nextPrice >= 500) {
@@ -1321,6 +2426,9 @@ async function startServer() {
           variant.minStock = nextMin;
         }
       }
+      if (req.body?.expiryDate !== undefined) {
+        variant.expiryDate = String(req.body.expiryDate || '').trim() || undefined;
+      }
 
       syncProductAvailability(product);
       saveDatabase(db);
@@ -1328,15 +2436,66 @@ async function startServer() {
     }
   );
 
-  // Gudang & Pemilik: Stock Movement (Masuk / Opname)
+  // Delete specific variant (requires > 1 variant remaining)
+  app.delete(
+    '/api/ops/products/:id/variant/:variantId',
+    requireAuth,
+    requireRoles(['PEMILIK', 'DIREKTUR', 'GUDANG']),
+    (req: AuthenticatedRequest, res) => {
+      const db = loadDatabase();
+      const product = db.products.find((p) => p.id === req.params.id);
+      if (!product) {
+        res.status(404).json({error: 'Produk tidak ditemukan.'});
+        return;
+      }
+      if (product.variants.length <= 1) {
+        res.status(400).json({error: 'Minimal harus tersisa 1 varian kemasan. Hapus produk jika ingin menghapus seluruhnya.'});
+        return;
+      }
+      const idx = product.variants.findIndex((v) => v.id === req.params.variantId);
+      if (idx === -1) {
+        res.status(404).json({error: 'Varian kemasan tidak ditemukan.'});
+        return;
+      }
+      const [removedVar] = product.variants.splice(idx, 1);
+      product.unitSummary = product.variants.map((v) => v.label).join(' · ');
+      syncProductAvailability(product);
+      recordAuditLog(db, req.user!, 'HAPUS_VARIAN', product.name, `Hapus varian ${removedVar.label}`);
+      saveDatabase(db);
+      res.json({product});
+    }
+  );
+
+  // Delete product
+  app.delete(
+    '/api/ops/products/:id',
+    requireAuth,
+    requireRoles(['PEMILIK', 'DIREKTUR', 'GUDANG']),
+    (req: AuthenticatedRequest, res) => {
+      const db = loadDatabase();
+      const idx = db.products.findIndex((p) => p.id === req.params.id);
+      if (idx === -1) {
+        res.status(404).json({error: 'Produk tidak ditemukan.'});
+        return;
+      }
+      const [removed] = db.products.splice(idx, 1);
+      recordAuditLog(db, req.user!, 'HAPUS_PRODUK', removed.name, `Hapus dari katalog toko`);
+      saveDatabase(db);
+      res.json({deletedId: removed.id});
+    }
+  );
+
+  // Gudang, Direktur & Pemilik: Stock Movement (Masuk / Opname / Rusak)
   app.post(
     '/api/ops/stock',
     requireAuth,
-    requireRoles(['PEMILIK', 'GUDANG']),
+    requireRoles(['PEMILIK', 'DIREKTUR', 'GUDANG']),
     (req: AuthenticatedRequest, res) => {
       const productId = String(req.body?.productId || '');
       const variantId = String(req.body?.variantId || '');
-      const type = req.body?.type === 'OPNAME' ? 'OPNAME' : 'MASUK';
+      const rawType = req.body?.type;
+      const type: 'MASUK' | 'OPNAME' | 'RUSAK' =
+        rawType === 'OPNAME' ? 'OPNAME' : rawType === 'RUSAK' ? 'RUSAK' : 'MASUK';
       const quantity = Math.floor(Number(req.body?.quantity || 0));
       const note = String(req.body?.note || '').trim();
       const recordExpense = Boolean(req.body?.recordExpense);
@@ -1360,6 +2519,15 @@ async function startServer() {
         }
         variant.stock += quantity;
         delta = quantity;
+      } else if (type === 'RUSAK') {
+        if (quantity <= 0 || quantity > variant.stock) {
+          res.status(400).json({
+            error: `Jumlah barang rusak/kedaluwarsa harus antara 1 dan ${variant.stock}.`,
+          });
+          return;
+        }
+        variant.stock -= quantity;
+        delta = -quantity;
       } else {
         if (quantity < 0) {
           res.status(400).json({error: 'Hasil opname stok tidak boleh negatif.'});
@@ -1371,6 +2539,13 @@ async function startServer() {
 
       syncProductAvailability(product);
 
+      const defaultNote =
+        type === 'MASUK'
+          ? 'Kulakan stok masuk'
+          : type === 'RUSAK'
+            ? 'Barang rusak / kedaluwarsa / susut'
+            : 'Penyesuaian stok opname';
+
       const movement = {
         id: `stk-${crypto.randomUUID().slice(0, 8)}`,
         productId: product.id,
@@ -1379,7 +2554,7 @@ async function startServer() {
         variantLabel: variant.label,
         type,
         quantityDelta: delta,
-        note: note || (type === 'MASUK' ? 'Kulakan stok masuk' : 'Penyesuaian stok opname'),
+        note: note || defaultNote,
         actorName: req.user!.displayName,
         createdAt: now,
       } as const;
@@ -1404,58 +2579,172 @@ async function startServer() {
     }
   );
 
-  // Pemasok & Pemilik: Submit incoming supplier restock delivery
+  // Pemasok, Direktur & Pemilik: Submit incoming supplier restock delivery (single or multi-item batch)
   app.post(
     '/api/ops/supplier/deliveries',
     requireAuth,
-    requireRoles(['PEMILIK', 'PEMASOK']),
+    requireRoles(['PEMILIK', 'DIREKTUR', 'PEMASOK']),
     (req: AuthenticatedRequest, res) => {
-      const productId = String(req.body?.productId || '');
-      const variantId = String(req.body?.variantId || '');
-      const quantity = Math.floor(Number(req.body?.quantity || 0));
-      const unitCost = Math.max(0, Math.round(Number(req.body?.unitCost || 0)));
-      const note = String(req.body?.note || '').trim();
+      const rawItems = Array.isArray(req.body?.items) && req.body.items.length > 0
+        ? req.body.items
+        : [
+            {
+              productId: req.body?.productId,
+              variantId: req.body?.variantId,
+              quantity: req.body?.quantity,
+              unitCost: req.body?.unitCost,
+            },
+          ];
 
-      if (!productId || !variantId || !Number.isFinite(quantity) || quantity <= 0) {
-        res.status(400).json({error: 'Pilih produk, varian, dan jumlah suplai lebih dari 0.'});
-        return;
-      }
+      const note = String(req.body?.note || '').trim();
+      const paymentStatus = req.body?.paymentStatus === 'TEMPO' ? 'TEMPO' : 'TUNAI';
+      const dueDate = String(req.body?.dueDate || '').trim() || undefined;
+      const invoicePhoto = isValidUploadedPhoto(req.body?.invoicePhoto)
+        ? req.body.invoicePhoto.trim()
+        : undefined;
+      const batchCode =
+        String(req.body?.batchCode || '').trim() ||
+        (rawItems.length > 1 ? `SJ-${crypto.randomUUID().slice(0, 4).toUpperCase()}` : undefined);
 
       const db = loadDatabase();
-      const product = db.products.find((p) => p.id === productId);
-      const variant = product?.variants.find((v) => v.id === variantId);
-      if (!product || !variant) {
-        res.status(404).json({error: 'Produk atau varian barang tidak ditemukan.'});
-        return;
+      const preparedDeliveries: SupplierDelivery[] = [];
+      const now = new Date().toISOString();
+
+      for (const rawItem of rawItems) {
+        const productId = String(rawItem?.productId || '');
+        const variantId = String(rawItem?.variantId || '');
+        const quantity = Math.floor(Number(rawItem?.quantity || 0));
+        const unitCost = Math.max(0, Math.round(Number(rawItem?.unitCost || 0)));
+
+        if (!productId || !variantId || !Number.isFinite(quantity) || quantity <= 0) {
+          res.status(400).json({error: 'Pilih produk, varian, dan jumlah suplai lebih dari 0.'});
+          return;
+        }
+        const product = db.products.find((p) => p.id === productId);
+        const variant = product?.variants.find((v) => v.id === variantId);
+        if (!product || !variant) {
+          res.status(404).json({error: 'Produk atau varian barang tidak ditemukan.'});
+          return;
+        }
+
+        preparedDeliveries.push({
+          id: `sup-${crypto.randomUUID().slice(0, 8)}`,
+          batchCode,
+          supplierId: req.user!.id,
+          supplierName: req.user!.displayName,
+          productId: product.id,
+          productName: product.name,
+          variantId: variant.id,
+          variantLabel: variant.label,
+          quantity,
+          unitCost: unitCost || variant.costPrice || Math.round(variant.price * 0.85),
+          note: note || 'Pengiriman suplai barang ke gudang Toko Dimas Jaya',
+          invoicePhoto,
+          status: 'MENUNGGU_TERIMA',
+          paymentStatus,
+          dueDate,
+          createdAt: now,
+        });
       }
 
-      const now = new Date().toISOString();
-      const delivery: SupplierDelivery = {
-        id: `sup-${crypto.randomUUID().slice(0, 8)}`,
-        supplierId: req.user!.id,
-        supplierName: req.user!.displayName,
-        productId: product.id,
-        productName: product.name,
-        variantId: variant.id,
-        variantLabel: variant.label,
-        quantity,
-        unitCost: unitCost || variant.costPrice || Math.round(variant.price * 0.85),
-        note: note || 'Pengiriman suplai barang ke gudang Toko Dimas Jaya',
-        status: 'MENUNGGU_TERIMA',
-        createdAt: now,
-      };
-
-      db.supplierDeliveries.unshift(delivery);
+      for (let i = preparedDeliveries.length - 1; i >= 0; i -= 1) {
+        db.supplierDeliveries.unshift(preparedDeliveries[i]);
+      }
       saveDatabase(db);
-      res.status(201).json({delivery});
+      res.status(201).json({
+        delivery: preparedDeliveries[0],
+        deliveries: preparedDeliveries,
+      });
     }
   );
 
-  // Gudang & Pemilik: Verify & receive supplier delivery into stock
+  // Edit pending supplier delivery
+  app.patch(
+    '/api/ops/supplier/deliveries/:id',
+    requireAuth,
+    requireRoles(['PEMILIK', 'DIREKTUR', 'PEMASOK']),
+    (req: AuthenticatedRequest, res) => {
+      const db = loadDatabase();
+      const delivery = db.supplierDeliveries.find((d) => d.id === req.params.id);
+      if (!delivery) {
+        res.status(404).json({error: 'Catatan kiriman pemasok tidak ditemukan.'});
+        return;
+      }
+      const isLeadership = req.user!.role === 'PEMILIK' || req.user!.role === 'DIREKTUR';
+      if (!isLeadership && delivery.supplierId !== req.user!.id) {
+        res.status(403).json({error: 'Anda hanya dapat mengubah kiriman milik Anda sendiri.'});
+        return;
+      }
+      if (delivery.status !== 'MENUNGGU_TERIMA') {
+        res.status(409).json({error: 'Kiriman yang sudah diterima gudang tidak dapat diubah lagi.'});
+        return;
+      }
+
+      if (req.body?.quantity !== undefined) {
+        const qty = Math.floor(Number(req.body.quantity));
+        if (!Number.isFinite(qty) || qty <= 0) {
+          res.status(400).json({error: 'Jumlah kiriman harus lebih dari 0.'});
+          return;
+        }
+        delivery.quantity = qty;
+      }
+      if (req.body?.unitCost !== undefined) {
+        const cost = Math.round(Number(req.body.unitCost));
+        if (Number.isFinite(cost) && cost >= 0) {
+          delivery.unitCost = cost;
+        }
+      }
+      if (typeof req.body?.note === 'string') {
+        delivery.note = req.body.note.trim() || delivery.note;
+      }
+      if (req.body?.paymentStatus === 'TEMPO' || req.body?.paymentStatus === 'TUNAI') {
+        delivery.paymentStatus = req.body.paymentStatus;
+      }
+      if (req.body?.dueDate !== undefined) {
+        delivery.dueDate = String(req.body.dueDate || '').trim() || undefined;
+      }
+      if (isValidUploadedPhoto(req.body?.invoicePhoto)) {
+        delivery.invoicePhoto = req.body.invoicePhoto.trim();
+      }
+
+      saveDatabase(db);
+      res.json({delivery});
+    }
+  );
+
+  // Cancel/delete pending supplier delivery
+  app.delete(
+    '/api/ops/supplier/deliveries/:id',
+    requireAuth,
+    requireRoles(['PEMILIK', 'DIREKTUR', 'PEMASOK']),
+    (req: AuthenticatedRequest, res) => {
+      const db = loadDatabase();
+      const idx = db.supplierDeliveries.findIndex((d) => d.id === req.params.id);
+      if (idx === -1) {
+        res.status(404).json({error: 'Catatan kiriman pemasok tidak ditemukan.'});
+        return;
+      }
+      const delivery = db.supplierDeliveries[idx];
+      const isLeadership = req.user!.role === 'PEMILIK' || req.user!.role === 'DIREKTUR';
+      if (!isLeadership && delivery.supplierId !== req.user!.id) {
+        res.status(403).json({error: 'Anda hanya dapat membatalkan kiriman milik Anda sendiri.'});
+        return;
+      }
+      if (delivery.status !== 'MENUNGGU_TERIMA') {
+        res.status(409).json({error: 'Kiriman yang sudah diterima gudang tidak dapat dibatalkan.'});
+        return;
+      }
+      db.supplierDeliveries.splice(idx, 1);
+      saveDatabase(db);
+      res.json({deletedId: delivery.id});
+    }
+  );
+
+  // Gudang, Direktur & Pemilik: Verify & receive supplier delivery into stock
   app.patch(
     '/api/ops/supplier/deliveries/:id/receive',
     requireAuth,
-    requireRoles(['PEMILIK', 'GUDANG']),
+    requireRoles(['PEMILIK', 'DIREKTUR', 'GUDANG']),
     (req: AuthenticatedRequest, res) => {
       const db = loadDatabase();
       const delivery = db.supplierDeliveries.find((d) => d.id === req.params.id);
@@ -1496,7 +2785,8 @@ async function startServer() {
         createdAt: now,
       });
 
-      if (req.body?.recordExpense && delivery.unitCost > 0) {
+      if (delivery.paymentStatus !== 'TEMPO' && req.body?.recordExpense && delivery.unitCost > 0) {
+        delivery.paymentStatus = 'LUNAS';
         db.ledger.unshift({
           id: `ldg-${crypto.randomUUID().slice(0, 8)}`,
           type: 'KELUAR',
@@ -1514,11 +2804,56 @@ async function startServer() {
     }
   );
 
-  // Keuangan & Pemilik: Ledger Entry
+  // Keuangan, Direktur & Pemilik: Settle TEMPO supplier payable
+  app.patch(
+    '/api/ops/supplier/deliveries/:id/pay',
+    requireAuth,
+    requireRoles(['PEMILIK', 'DIREKTUR', 'KEUANGAN']),
+    (req: AuthenticatedRequest, res) => {
+      const db = loadDatabase();
+      const delivery = db.supplierDeliveries.find((d) => d.id === req.params.id);
+      if (!delivery) {
+        res.status(404).json({error: 'Tagihan suplai pemasok tidak ditemukan.'});
+        return;
+      }
+      if (delivery.paymentStatus === 'LUNAS') {
+        res.json({delivery});
+        return;
+      }
+      const totalBill = delivery.unitCost * delivery.quantity;
+      const now = new Date().toISOString();
+      delivery.paymentStatus = 'LUNAS';
+
+      if (totalBill > 0) {
+        db.ledger.unshift({
+          id: `ldg-${crypto.randomUUID().slice(0, 8)}`,
+          type: 'KELUAR',
+          category: 'Bayar Hutang Pemasok',
+          description: `Pelunasan suplai ${delivery.supplierName}: ${delivery.productName} x${delivery.quantity}`,
+          amount: totalBill,
+          paymentMethod: String(req.body?.paymentMethod || 'TRANSFER'),
+          actorName: req.user!.displayName,
+          createdAt: now,
+        });
+      }
+
+      recordAuditLog(
+        db,
+        req.user!,
+        'BAYAR_PEMASOK',
+        delivery.supplierName,
+        `Pelunasan suplai ${delivery.productName} Rp ${totalBill.toLocaleString('id-ID')}`
+      );
+      saveDatabase(db);
+      res.json({delivery});
+    }
+  );
+
+  // Keuangan, Direktur & Pemilik: Ledger Entry
   app.post(
     '/api/ops/ledger',
     requireAuth,
-    requireRoles(['PEMILIK', 'KEUANGAN']),
+    requireRoles(['PEMILIK', 'DIREKTUR', 'KEUANGAN']),
     (req: AuthenticatedRequest, res) => {
       const type = req.body?.type === 'MASUK' ? 'MASUK' : 'KELUAR';
       const category = String(req.body?.category || 'Operasional Toko').trim();
@@ -1549,11 +2884,55 @@ async function startServer() {
     }
   );
 
-  // Keuangan, Kasir & Pemilik: Kasbon Payment / Entry
+  // Keuangan, Kasir, Direktur & Pemilik: Create manual Kasbon record
+  app.post(
+    '/api/ops/kasbon',
+    requireAuth,
+    requireRoles(['PEMILIK', 'DIREKTUR', 'KEUANGAN', 'KASIR']),
+    (req: AuthenticatedRequest, res) => {
+      const customerName = String(req.body?.customerName || '').trim();
+      const phone = String(req.body?.phone || '').trim();
+      const address = String(req.body?.address || '').trim() || 'Warga Gunung Batin Udik';
+      const amountDue = Math.round(Number(req.body?.amountDue || 0));
+      const dueDate = String(req.body?.dueDate || '').trim() || undefined;
+      const note = String(req.body?.note || '').trim() || 'Catatan bon / kasbon manual';
+
+      if (customerName.length < 2 || !Number.isFinite(amountDue) || amountDue <= 0) {
+        res.status(400).json({error: 'Nama warga/warung dan nominal tagihan wajib valid.'});
+        return;
+      }
+
+      const db = loadDatabase();
+      const now = new Date().toISOString();
+      const record = {
+        id: `ksb-${crypto.randomUUID().slice(0, 8)}`,
+        customerName,
+        phone,
+        address,
+        amountDue,
+        totalPaid: 0,
+        dueDate,
+        note,
+        updatedAt: now,
+      };
+      db.kasbon.unshift(record);
+      recordAuditLog(
+        db,
+        req.user!,
+        'TAMBAH_KASBON',
+        customerName,
+        `Catat kasbon Rp ${amountDue.toLocaleString('id-ID')}`
+      );
+      saveDatabase(db);
+      res.status(201).json({kasbon: record});
+    }
+  );
+
+  // Keuangan, Kasir, Direktur & Pemilik: Kasbon Payment
   app.post(
     '/api/ops/kasbon/:id/pay',
     requireAuth,
-    requireRoles(['PEMILIK', 'KEUANGAN', 'KASIR']),
+    requireRoles(['PEMILIK', 'DIREKTUR', 'KEUANGAN', 'KASIR']),
     (req: AuthenticatedRequest, res) => {
       const paymentAmount = Math.round(Number(req.body?.amount || 0));
       const db = loadDatabase();
@@ -1588,6 +2967,151 @@ async function startServer() {
 
       saveDatabase(db);
       res.json({kasbon: record});
+    }
+  );
+
+  // Complaints & Returns resolution (scoped by role)
+  app.patch(
+    '/api/ops/complaints/:id',
+    requireAuth,
+    requireRoles(['PEMILIK', 'DIREKTUR', 'KASIR', 'GUDANG']),
+    (req: AuthenticatedRequest, res) => {
+      const db = loadDatabase();
+      const complaint = db.complaints.find((c) => c.id === req.params.id);
+      if (!complaint) {
+        res.status(404).json({error: 'Laporan komplain tidak ditemukan.'});
+        return;
+      }
+
+      const nextStatus = req.body?.status as ComplaintStatus;
+      const validStatuses: ComplaintStatus[] = [
+        'BARU',
+        'DIPROSES',
+        'DISETUJUI',
+        'SELESAI',
+        'DITOLAK',
+      ];
+      if (!validStatuses.includes(nextStatus)) {
+        res.status(400).json({error: 'Status komplain tidak valid.'});
+        return;
+      }
+
+      const isLeadership = req.user!.role === 'PEMILIK' || req.user!.role === 'DIREKTUR';
+      if (!isLeadership && ['DISETUJUI', 'DITOLAK'].includes(nextStatus)) {
+        res.status(403).json({
+          error: 'Persetujuan akhir atau penolakan retur/refund dilakukan oleh Pemilik atau Direktur.',
+        });
+        return;
+      }
+
+      const prevStatus = complaint.status;
+      const now = new Date().toISOString();
+      complaint.status = nextStatus;
+      complaint.handledBy = req.user!.displayName;
+      complaint.updatedAt = now;
+      if (typeof req.body?.staffResponse === 'string') {
+        complaint.staffResponse = req.body.staffResponse.trim();
+      }
+
+      const refundAmount = Math.max(0, Math.round(Number(req.body?.refundAmount || 0)));
+      if (refundAmount > 0) {
+        complaint.refundAmount = refundAmount;
+      }
+
+      const isFinalizingResolution =
+        (nextStatus === 'DISETUJUI' || nextStatus === 'SELESAI') &&
+        prevStatus !== 'DISETUJUI' &&
+        prevStatus !== 'SELESAI' &&
+        (complaint.refundAmount || 0) > 0;
+
+      // Record refund expense in ledger when REFUND_DANA is finalized
+      if (
+        isFinalizingResolution &&
+        complaint.requestedResolution === 'REFUND_DANA' &&
+        !db.ledger.some((l) => l.description.includes(complaint.complaintNumber))
+      ) {
+        db.ledger.unshift({
+          id: `ldg-${crypto.randomUUID().slice(0, 8)}`,
+          type: 'KELUAR',
+          category: 'Refund / Retur Pelanggan',
+          description: `Refund ${complaint.complaintNumber} (${complaint.orderNumber} a/n ${complaint.customerName})`,
+          amount: complaint.refundAmount!,
+          paymentMethod: 'TUNAI',
+          actorName: req.user!.displayName,
+          createdAt: now,
+        });
+      }
+
+      // Deduct open Kasbon balance automatically when POTONG_TAGIHAN is approved/finalized
+      if (
+        isFinalizingResolution &&
+        complaint.requestedResolution === 'POTONG_TAGIHAN' &&
+        !db.ledger.some((l) => l.description.includes(complaint.complaintNumber))
+      ) {
+        const cmpPhone = normalizePhoneDigits(complaint.phone);
+        const openKasbon = db.kasbon.find((k) => {
+          const remaining = Math.max(0, k.amountDue - k.totalPaid);
+          if (remaining <= 0) return false;
+          const kp = normalizePhoneDigits(k.phone);
+          if (cmpPhone && kp) return kp === cmpPhone;
+          return k.customerName.trim().toLowerCase() === complaint.customerName.trim().toLowerCase();
+        });
+        let appliedCut = complaint.refundAmount!;
+        if (openKasbon) {
+          const remaining = Math.max(0, openKasbon.amountDue - openKasbon.totalPaid);
+          appliedCut = Math.min(remaining, complaint.refundAmount!);
+          if (appliedCut > 0) {
+            openKasbon.totalPaid += appliedCut;
+            openKasbon.updatedAt = now;
+            openKasbon.note = `${openKasbon.note} · [Potongan ${complaint.complaintNumber}: Rp ${appliedCut.toLocaleString('id-ID')}]`;
+          }
+        }
+        if (appliedCut > 0) {
+          db.ledger.unshift({
+            id: `ldg-${crypto.randomUUID().slice(0, 8)}`,
+            type: 'KELUAR',
+            category: 'Potongan / Retur Pelanggan',
+            description: `Potong tagihan ${complaint.complaintNumber} (${complaint.orderNumber} a/n ${complaint.customerName})`,
+            amount: appliedCut,
+            paymentMethod: 'KASBON',
+            actorName: req.user!.displayName,
+            createdAt: now,
+          });
+        }
+      }
+
+      // Optional stock return recording when product/variant specified
+      if (req.body?.returnProductId && req.body?.returnVariantId && Number(req.body?.returnQty) > 0) {
+        const retProduct = db.products.find((p) => p.id === req.body.returnProductId);
+        const retVariant = retProduct?.variants.find((v) => v.id === req.body.returnVariantId);
+        const retQty = Math.floor(Number(req.body.returnQty));
+        if (retProduct && retVariant && retQty > 0) {
+          retVariant.stock += retQty;
+          syncProductAvailability(retProduct);
+          db.stockMovements.unshift({
+            id: `stk-${crypto.randomUUID().slice(0, 8)}`,
+            productId: retProduct.id,
+            productName: retProduct.name,
+            variantId: retVariant.id,
+            variantLabel: retVariant.label,
+            type: 'RETUR',
+            quantityDelta: retQty,
+            note: `Retur masuk ${complaint.complaintNumber} (#${complaint.orderNumber})`,
+            actorName: req.user!.displayName,
+            createdAt: now,
+          });
+        }
+      }
+
+      recordAuditLog(
+        db,
+        req.user!,
+        'TANGANI_KOMPLAIN',
+        complaint.complaintNumber,
+        `Status -> ${nextStatus}: ${complaint.staffResponse || '-'}`
+      );
+      saveDatabase(db);
+      res.json({complaint});
     }
   );
 

@@ -1,6 +1,11 @@
 import type {
+  ComplaintCategory,
+  ComplaintResolution,
+  ComplaintStatus,
+  DeliveryCheckpoint,
   DivisionRole,
   OrderStatus,
+  PaymentStatus,
   Product,
   ProductCategory,
   StoreSettings,
@@ -22,6 +27,9 @@ export const DEFAULT_STORE_SETTINGS: StoreSettings = {
   mapsUrl:
     'https://www.google.com/maps/search/?api=1&query=Gunung+Batin+Udik+Terusan+Nunyai+Lampung+Tengah',
   heroImage: '/src/assets/images/hero_toko_dimas_jaya_1795680105174.jpg',
+  whatsappNumber: '6281279008899',
+  qrisMerchantName: 'TOKO DIMAS JAYA',
+  qrisNmid: 'ID1020260000188',
 };
 
 export const STORE_CATEGORIES: ProductCategory[] = [
@@ -46,13 +54,13 @@ export const STORE_HIGHLIGHTS = [
   },
   {
     index: '03.',
-    title: 'Bayar Tunai atau COD',
-    detail: 'Bayar di tempat saat barang diterima atau ambil langsung di toko.',
+    title: 'COD, Tunai & QRIS Dinamis',
+    detail: 'Bayar di tempat saat barang tiba atau scan QRIS nominal otomatis.',
   },
   {
     index: '04.',
-    title: 'Harga Ecer & Warung',
-    detail: 'Melayani belanja rumah tangga harian maupun kulakan warung sekitar.',
+    title: 'Akun Warga & Garansi Retur',
+    detail: 'Riwayat belanja tersimpan rapi lengkap dengan layanan komplain dan retur.',
   },
 ];
 
@@ -200,8 +208,19 @@ export const INITIAL_PUBLIC_PRODUCTS: Product[] = [
   },
 ];
 
+export const ROLE_HIERARCHY_LEVEL: Record<DivisionRole, string> = {
+  PEMILIK: 'Pimpinan Tertinggi (Level 1)',
+  DIREKTUR: 'Manajemen Operasional (Level 2)',
+  KEUANGAN: 'Staf Keuangan (Level 3)',
+  KASIR: 'Staf Kasir (Level 3)',
+  GUDANG: 'Staf Gudang (Level 3)',
+  KURIR: 'Staf Kurir (Level 3)',
+  PEMASOK: 'Mitra Pemasok Eksternal',
+};
+
 export const ROLE_LABELS: Record<DivisionRole, string> = {
   PEMILIK: 'Pemilik Toko',
+  DIREKTUR: 'Direktur Operasional',
   KASIR: 'Divisi Kasir',
   GUDANG: 'Divisi Gudang & Stok',
   PEMASOK: 'Mitra Pemasok / Supplier',
@@ -211,17 +230,19 @@ export const ROLE_LABELS: Record<DivisionRole, string> = {
 
 export const ROLE_SCOPE_DESCRIPTIONS: Record<DivisionRole, string> = {
   PEMILIK:
-    'Akses penuh ke omzet, laba/kas, semua divisi, manajemen akun staf/pemasok, dan pengaturan toko.',
+    'Wewenang tertinggi atas omzet, laba produk, manajemen Direktur & seluruh staf, konfigurasi QRIS/WA, serta log audit toko.',
+  DIREKTUR:
+    'Mengawasi operasional harian seluruh divisi di bawah Pemilik (Kasir, Gudang, Pemasok, Kurir, Keuangan), menyetujui komplain/retur, dan mengelola akun staf divisi.',
   KASIR:
-    'Fokus transaksi meja kasir (POS), konfirmasi pesanan masuk, dan pencatatan cicilan kasbon pelanggan.',
+    'Fokus transaksi meja kasir (POS), buka/tutup shift laci tunai, verifikasi QRIS pesanan masuk, dan pencatatan cicilan kasbon pelanggan.',
   GUDANG:
-    'Mengelola stok fisik, opname, produk baru, penyiapan barang pesanan, dan penerimaan kiriman pemasok.',
+    'Mengelola stok fisik, edit produk & kedaluwarsa, opname, penyiapan pesanan online, penerimaan suplai pemasok, serta stok barang retur.',
   PEMASOK:
-    'Melihat kebutuhan stok menipis dan mengirim catatan suplai barang masuk tanpa akses kas, pelanggan, atau staf.',
+    'Melihat kebutuhan stok menipis dan mengirim catatan suplai serta memantau status pembayaran tagihan suplainya tanpa akses data pelanggan/kas.',
   KURIR:
-    'Khusus antrean antar COD, berbagi lokasi langsung kurir di peta, dan konfirmasi setoran tunai saat tiba.',
+    'Khusus antrean antar COD, berbagi lokasi langsung kurir di peta, kirim notifikasi WhatsApp otomatis ke pembeli, dan konfirmasi terima tunai.',
   KEUANGAN:
-    'Mengelola buku kas harian, pemasukan/pengeluaran operasional, dan pelunasan kasbon pelanggan.',
+    'Mengelola buku kas harian, filter & ekspor laporan keuangan, pelunasan kasbon pelanggan, serta pembayaran tagihan hutang pemasok.',
 };
 
 export const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
@@ -232,8 +253,37 @@ export const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
   DIBATALKAN: 'Dibatalkan',
 };
 
+export const PAYMENT_STATUS_LABELS: Record<PaymentStatus, string> = {
+  BELUM_BAYAR: 'Bayar Saat Terima / di Toko',
+  MENUNGGU_QRIS: 'Menunggu Pembayaran QRIS',
+  LUNAS: 'Lunas',
+  KASBON: 'Kasbon / Bon Warga',
+};
+
+export const COMPLAINT_CATEGORY_LABELS: Record<ComplaintCategory, string> = {
+  BARANG_RUSAK: 'Barang Rusak / Pecah',
+  KURANG_ITEM: 'Jumlah / Item Kurang',
+  SALAH_VARIAN: 'Salah Barang / Kemasan',
+  KEDALUWARSA: 'Mendekati / Lewat Kedaluwarsa',
+  LAINNYA: 'Kendala Lainnya',
+};
+
+export const COMPLAINT_RESOLUTION_LABELS: Record<ComplaintResolution, string> = {
+  GANTI_BARANG: 'Tukar / Ganti Barang Baru',
+  REFUND_DANA: 'Pengembalian Dana (Refund)',
+  POTONG_TAGIHAN: 'Potong Tagihan / Saldo',
+};
+
+export const COMPLAINT_STATUS_LABELS: Record<ComplaintStatus, string> = {
+  BARU: 'Laporan Masuk',
+  DIPROSES: 'Sedang Dicek Toko',
+  DISETUJUI: 'Disetujui (Proses Ganti/Refund)',
+  SELESAI: 'Selesai Ditangani',
+  DITOLAK: 'Tidak Disetujui',
+};
+
 export const DELIVERY_CHECKPOINT_LABELS: Record<
-  import('../types/store').DeliveryCheckpoint,
+  DeliveryCheckpoint,
   {label: string; progress: number}
 > = {
   PERSIAPAN_TOKO: {label: 'Disiapkan di Toko Dimas Jaya', progress: 20},

@@ -2,6 +2,9 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type {
+  AuditLogEntry,
+  CashierShift,
+  ComplaintRecord,
   DivisionRole,
   KasbonRecord,
   LedgerEntry,
@@ -22,6 +25,15 @@ export interface StoredStaff {
   createdAt: string;
 }
 
+export interface StoredCustomer {
+  id: string;
+  name: string;
+  phone: string;
+  defaultAddress: string;
+  passcodeHash: string;
+  createdAt: string;
+}
+
 export interface TokoDatabase {
   settings: StoreSettings;
   products: Product[];
@@ -30,8 +42,13 @@ export interface TokoDatabase {
   ledger: LedgerEntry[];
   kasbon: KasbonRecord[];
   supplierDeliveries: SupplierDelivery[];
+  complaints: ComplaintRecord[];
+  shifts: CashierShift[];
+  auditLogs: AuditLogEntry[];
+  customers: StoredCustomer[];
   staff: StoredStaff[];
   orderSeq: number;
+  complaintSeq: number;
 }
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
@@ -77,6 +94,9 @@ function createInitialDatabase(): TokoDatabase {
       mapsUrl:
         'https://www.google.com/maps/search/?api=1&query=Gunung+Batin+Udik+Terusan+Nunyai+Lampung+Tengah',
       heroImage: '/src/assets/images/hero_toko_dimas_jaya_1795680105174.jpg',
+      whatsappNumber: '6281279008899',
+      qrisMerchantName: 'TOKO DIMAS JAYA',
+      qrisNmid: 'ID1020260000188',
     },
     products: [
       {
@@ -226,12 +246,14 @@ function createInitialDatabase(): TokoDatabase {
         id: 'ord-seed-1001',
         orderNumber: 'DJ-1001',
         source: 'ONLINE',
+        customerId: null,
         customerName: 'Ibu Rina',
         phone: '081379001122',
         deliveryMethod: 'cod',
         addressNote: 'Gang Makam RT 02, rumah pagar hijau',
         notes: 'Antar pagi ya mas',
         paymentMethod: 'COD',
+        paymentStatus: 'BELUM_BAYAR',
         status: 'DIANTAR',
         items: [
           {
@@ -272,12 +294,14 @@ function createInitialDatabase(): TokoDatabase {
         id: 'ord-seed-1002',
         orderNumber: 'DJ-1002',
         source: 'POS',
+        customerId: null,
         customerName: 'Pak Hendro',
         phone: '085268003344',
         deliveryMethod: 'instore',
         addressNote: 'Belanja langsung di Toko Dimas Jaya',
         notes: '',
         paymentMethod: 'TUNAI',
+        paymentStatus: 'LUNAS',
         status: 'SELESAI',
         items: [
           {
@@ -381,13 +405,19 @@ function createInitialDatabase(): TokoDatabase {
         unitCost: 64000,
         note: 'Surat Jalan SJ-014 (sudah masuk gudang)',
         status: 'DITERIMA',
+        paymentStatus: 'LUNAS',
         receivedBy: 'Divisi Gudang',
         createdAt: now,
         receivedAt: now,
       },
     ],
+    complaints: [],
+    shifts: [],
+    auditLogs: [],
+    customers: [],
     staff: [],
     orderSeq: 1002,
+    complaintSeq: 100,
   };
 }
 
@@ -403,9 +433,15 @@ export function loadDatabase(): TokoDatabase {
   try {
     const raw = fs.readFileSync(DB_FILE, 'utf8');
     const parsed = JSON.parse(raw) as TokoDatabase;
-    if (!Array.isArray(parsed.supplierDeliveries)) {
-      parsed.supplierDeliveries = [];
-    }
+    if (!Array.isArray(parsed.supplierDeliveries)) parsed.supplierDeliveries = [];
+    if (!Array.isArray(parsed.complaints)) parsed.complaints = [];
+    if (!Array.isArray(parsed.shifts)) parsed.shifts = [];
+    if (!Array.isArray(parsed.auditLogs)) parsed.auditLogs = [];
+    if (!Array.isArray(parsed.customers)) parsed.customers = [];
+    if (typeof parsed.complaintSeq !== 'number') parsed.complaintSeq = 100;
+    if (!parsed.settings.qrisMerchantName) parsed.settings.qrisMerchantName = 'TOKO DIMAS JAYA';
+    if (!parsed.settings.qrisNmid) parsed.settings.qrisNmid = 'ID1020260000188';
+    if (!parsed.settings.whatsappNumber) parsed.settings.whatsappNumber = '6281279008899';
     return parsed;
   } catch {
     const fallback = createInitialDatabase();

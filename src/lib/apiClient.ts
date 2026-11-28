@@ -1,9 +1,22 @@
 import {
+  buildCourierWhatsappLink,
+  buildOrderQrisInfo,
+  normalizePhoneDigits,
+} from './qrisHelpers';
+import {isValidUploadedPhoto} from './imageHelpers';
+import {
   DEFAULT_STORE_SETTINGS,
   INITIAL_PUBLIC_PRODUCTS,
 } from './storeData';
 import type {
+  AuditLogEntry,
   AuthUser,
+  CashierShift,
+  ComplaintCategory,
+  ComplaintRecord,
+  ComplaintResolution,
+  ComplaintStatus,
+  CustomerProfile,
   DeliveryCheckpoint,
   DivisionRole,
   GeoPoint,
@@ -18,6 +31,7 @@ import type {
   StockMovement,
   StoreSettings,
   SupplierDelivery,
+  WhatsappNotification,
 } from '../types/store';
 
 interface LocalStaffRecord {
@@ -30,6 +44,15 @@ interface LocalStaffRecord {
   createdAt: string;
 }
 
+interface LocalCustomerRecord {
+  id: string;
+  name: string;
+  phone: string;
+  defaultAddress: string;
+  passcodeHash: string;
+  createdAt: string;
+}
+
 interface LocalStoreDb {
   settings: StoreSettings;
   products: Product[];
@@ -38,8 +61,13 @@ interface LocalStoreDb {
   ledger: LedgerEntry[];
   kasbon: KasbonRecord[];
   supplierDeliveries: SupplierDelivery[];
+  complaints: ComplaintRecord[];
+  shifts: CashierShift[];
+  auditLogs: AuditLogEntry[];
+  customers: LocalCustomerRecord[];
   staff: LocalStaffRecord[];
   orderSeq: number;
+  complaintSeq: number;
 }
 
 export interface ApiResult<T = Record<string, unknown>> {
@@ -51,7 +79,26 @@ export interface ApiResult<T = Record<string, unknown>> {
 
 const LOCAL_DB_KEY = 'toko_dimas_jaya_db_v1';
 const memorySessions = new Map<string, AuthUser>();
+const memoryCustomerSessions = new Map<string, string>();
 let detectedStaticMode = false;
+
+const VALID_ROLES: DivisionRole[] = [
+  'PEMILIK',
+  'DIREKTUR',
+  'KASIR',
+  'GUDANG',
+  'PEMASOK',
+  'KURIR',
+  'KEUANGAN',
+];
+
+const DIRECTOR_MANAGED_ROLES: DivisionRole[] = [
+  'KASIR',
+  'GUDANG',
+  'PEMASOK',
+  'KURIR',
+  'KEUANGAN',
+];
 
 function randomId(prefix: string): string {
   const bytes = new Uint8Array(4);
@@ -143,12 +190,14 @@ function seedLocalDatabase(): LocalStoreDb {
         id: 'ord-seed-1001',
         orderNumber: 'DJ-1001',
         source: 'ONLINE',
+        customerId: null,
         customerName: 'Ibu Rina',
         phone: '081379001122',
         deliveryMethod: 'cod',
         addressNote: 'Gang Makam RT 02, rumah pagar hijau',
         notes: 'Antar pagi ya mas',
         paymentMethod: 'COD',
+        paymentStatus: 'BELUM_BAYAR',
         status: 'DIANTAR',
         items: [
           {
@@ -182,6 +231,7 @@ function seedLocalDatabase(): LocalStoreDb {
           etaMinutes: 10,
           updatedAt: now,
         },
+        whatsappNotifications: [],
         createdAt: now,
         updatedAt: now,
       },
@@ -189,12 +239,14 @@ function seedLocalDatabase(): LocalStoreDb {
         id: 'ord-seed-1002',
         orderNumber: 'DJ-1002',
         source: 'POS',
+        customerId: null,
         customerName: 'Pak Hendro',
         phone: '085268003344',
         deliveryMethod: 'instore',
         addressNote: 'Belanja langsung di Toko Dimas Jaya',
         notes: '',
         paymentMethod: 'TUNAI',
+        paymentStatus: 'LUNAS',
         status: 'SELESAI',
         items: [
           {
@@ -286,13 +338,19 @@ function seedLocalDatabase(): LocalStoreDb {
         unitCost: 64000,
         note: 'Surat Jalan SJ-014 (sudah masuk gudang)',
         status: 'DITERIMA',
+        paymentStatus: 'LUNAS',
         receivedBy: 'Divisi Gudang',
         createdAt: now,
         receivedAt: now,
       },
     ],
+    complaints: [],
+    shifts: [],
+    auditLogs: [],
+    customers: [],
     staff: [],
     orderSeq: 1002,
+    complaintSeq: 100,
   };
 }
 
@@ -301,9 +359,15 @@ function readLocalDb(): LocalStoreDb {
     const raw = window.localStorage.getItem(LOCAL_DB_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as LocalStoreDb;
-      if (!Array.isArray(parsed.supplierDeliveries)) {
-        parsed.supplierDeliveries = [];
-      }
+      if (!Array.isArray(parsed.supplierDeliveries)) parsed.supplierDeliveries = [];
+      if (!Array.isArray(parsed.complaints)) parsed.complaints = [];
+      if (!Array.isArray(parsed.shifts)) parsed.shifts = [];
+      if (!Array.isArray(parsed.auditLogs)) parsed.auditLogs = [];
+      if (!Array.isArray(parsed.customers)) parsed.customers = [];
+      if (typeof parsed.complaintSeq !== 'number') parsed.complaintSeq = 100;
+      if (!parsed.settings.qrisMerchantName) parsed.settings.qrisMerchantName = 'TOKO DIMAS JAYA';
+      if (!parsed.settings.qrisNmid) parsed.settings.qrisNmid = 'ID1020260000188';
+      if (!parsed.settings.whatsappNumber) parsed.settings.whatsappNumber = '6281279008899';
       return parsed;
     }
   } catch {
@@ -350,6 +414,35 @@ function sanitizeOrderForLocalRole(order: Order): Order {
   };
 }
 
+function sanitizeOrderForLocalPublic(order: Order) {
+  return {
+    id: order.id,
+    orderNumber: order.orderNumber,
+    customerName: order.customerName,
+    deliveryMethod: order.deliveryMethod,
+    paymentMethod: order.paymentMethod,
+    paymentStatus: order.paymentStatus || (order.paymentMethod === 'QRIS' ? 'MENUNGGU_QRIS' : 'BELUM_BAYAR'),
+    qris: order.qris,
+    discountAmount: order.discountAmount || 0,
+    addressNote: order.addressNote,
+    notes: order.notes,
+    status: order.status,
+    items: order.items.map(({costPrice: _c, ...rest}) => rest),
+    subtotal: order.subtotal,
+    deliveryFee: order.deliveryFee,
+    total: order.total,
+    handledBy: order.handledBy,
+    courierName: order.courierName,
+    assignedCourierId: order.assignedCourierId,
+    assignedCourierName: order.assignedCourierName,
+    customerCoords: order.customerCoords || null,
+    tracking: order.tracking,
+    whatsappNotifications: order.whatsappNotifications || [],
+    createdAt: order.createdAt,
+    updatedAt: order.updatedAt,
+  };
+}
+
 function syncProductAvailability(product: Product): void {
   const totalStock = product.variants.reduce((sum, v) => sum + v.stock, 0);
   if (totalStock <= 0) {
@@ -359,6 +452,56 @@ function syncProductAvailability(product: Product): void {
   } else {
     product.availability = 'Stok Tersedia';
   }
+}
+
+function recordLocalAuditLog(
+  db: LocalStoreDb,
+  actor: {id: string; displayName: string; role: string},
+  action: string,
+  target: string,
+  detail: string
+): void {
+  db.auditLogs.unshift({
+    id: randomId('aud'),
+    actorId: actor.id,
+    actorName: actor.displayName,
+    actorRole: actor.role,
+    action,
+    target,
+    detail,
+    createdAt: new Date().toISOString(),
+  });
+  if (db.auditLogs.length > 200) db.auditLogs = db.auditLogs.slice(0, 200);
+}
+
+function appendLocalWhatsappNotification(
+  order: Order,
+  trigger: WhatsappNotification['trigger'],
+  actorName: string
+): WhatsappNotification {
+  const {waLink, message} = buildCourierWhatsappLink({
+    phone: order.phone,
+    customerName: order.customerName,
+    orderNumber: order.orderNumber,
+    courierName: order.courierName || actorName,
+    etaMinutes: order.tracking?.etaMinutes,
+    addressNote: order.addressNote,
+    total: order.total,
+    paymentStatus: order.paymentStatus,
+    trigger,
+  });
+  const notif: WhatsappNotification = {
+    id: randomId('wa'),
+    trigger,
+    recipientPhone: order.phone,
+    message,
+    waLink,
+    actorName,
+    sentAt: new Date().toISOString(),
+  };
+  if (!Array.isArray(order.whatsappNotifications)) order.whatsappNotifications = [];
+  order.whatsappNotifications.unshift(notif);
+  return notif;
 }
 
 function getLocalAuthUser(headers?: HeadersInit): AuthUser | null {
@@ -379,6 +522,23 @@ function getLocalAuthUser(headers?: HeadersInit): AuthUser | null {
   };
 }
 
+function getLocalCustomer(headers: HeadersInit | undefined, db: LocalStoreDb): LocalCustomerRecord | null {
+  const h = new Headers(headers);
+  const auth = h.get('Authorization') || '';
+  if (!auth.startsWith('Bearer ')) return null;
+  const token = auth.slice(7).trim();
+  const custId = memoryCustomerSessions.get(token);
+  if (!custId) return null;
+  return db.customers.find((c) => c.id === custId) || null;
+}
+
+function doesCustomerOwnLocalOrder(customer: {id: string; phone: string}, order: Order): boolean {
+  if (order.customerId && order.customerId === customer.id) return true;
+  const cp = normalizePhoneDigits(customer.phone);
+  const op = normalizePhoneDigits(order.phone);
+  return Boolean(cp && op && cp === op);
+}
+
 async function handleStaticFallback(
   url: string,
   options: RequestInit = {}
@@ -390,7 +550,7 @@ async function handleStaticFallback(
 
   const db = readLocalDb();
 
-  // --- AUTH ---
+  // --- STAFF AUTH ---
   if (path === '/api/auth/status' && method === 'GET') {
     const ownerClaimed = db.staff.some((s) => s.role === 'PEMILIK' && s.active);
     return {
@@ -441,6 +601,13 @@ async function handleStaticFallback(
       createdAt: new Date().toISOString(),
     };
     db.staff.push(ownerRecord);
+    recordLocalAuditLog(
+      db,
+      {id: ownerRecord.id, displayName: ownerRecord.displayName, role: ownerRecord.role},
+      'CLAIM_PEMILIK',
+      ownerRecord.username,
+      'Aktivasi awal akun Pemilik Toko Dimas Jaya'
+    );
     writeLocalDb(db);
     const authUser: AuthUser = {
       id: ownerRecord.id,
@@ -488,6 +655,150 @@ async function handleStaticFallback(
     };
   }
 
+  // --- CUSTOMER PORTAL ---
+  if (path === '/api/customer/register' && method === 'POST') {
+    const name = String(body.name || '').trim();
+    const phone = normalizePhoneDigits(String(body.phone || ''));
+    const defaultAddress = String(body.defaultAddress || '').trim();
+    const passcode = String(body.passcode || '');
+    if (name.length < 2 || phone.length < 8 || passcode.length < 6) {
+      return {
+        ok: false,
+        status: 400,
+        storageMode: 'browser',
+        data: {error: 'Nama min. 2 karakter, nomor HP valid, dan kata sandi min. 6 karakter.'},
+      };
+    }
+    if (db.customers.some((c) => normalizePhoneDigits(c.phone) === phone)) {
+      return {
+        ok: false,
+        status: 409,
+        storageMode: 'browser',
+        data: {error: 'Nomor HP ini sudah terdaftar. Silakan masuk.'},
+      };
+    }
+    const rec: LocalCustomerRecord = {
+      id: randomId('cst'),
+      name,
+      phone,
+      defaultAddress: defaultAddress || 'Gang Makam, Gunung Batin Udik',
+      passcodeHash: await hashLocalPasscode(passcode),
+      createdAt: new Date().toISOString(),
+    };
+    db.customers.push(rec);
+    for (const o of db.orders) {
+      if (!o.customerId && normalizePhoneDigits(o.phone) === phone) o.customerId = rec.id;
+    }
+    writeLocalDb(db);
+    const customerToken = randomId('ctok');
+    memoryCustomerSessions.set(customerToken, rec.id);
+    const profile: CustomerProfile = {
+      id: rec.id,
+      name: rec.name,
+      phone: rec.phone,
+      defaultAddress: rec.defaultAddress,
+      createdAt: rec.createdAt,
+    };
+    return {ok: true, status: 201, storageMode: 'browser', data: {customerToken, customer: profile}};
+  }
+
+  if (path === '/api/customer/login' && method === 'POST') {
+    const phone = normalizePhoneDigits(String(body.phone || ''));
+    const passcode = String(body.passcode || '');
+    const rec = db.customers.find((c) => normalizePhoneDigits(c.phone) === phone);
+    if (!rec || !(await verifyLocalPasscode(passcode, rec.passcodeHash))) {
+      return {
+        ok: false,
+        status: 401,
+        storageMode: 'browser',
+        data: {error: 'Nomor HP atau kata sandi salah.'},
+      };
+    }
+    const customerToken = randomId('ctok');
+    memoryCustomerSessions.set(customerToken, rec.id);
+    const profile: CustomerProfile = {
+      id: rec.id,
+      name: rec.name,
+      phone: rec.phone,
+      defaultAddress: rec.defaultAddress,
+      createdAt: rec.createdAt,
+    };
+    return {ok: true, status: 200, storageMode: 'browser', data: {customerToken, customer: profile}};
+  }
+
+  if (path === '/api/customer/me' && method === 'GET') {
+    const cust = getLocalCustomer(options.headers, db);
+    if (!cust) {
+      return {ok: false, status: 401, storageMode: 'browser', data: {error: 'Silakan masuk.'}};
+    }
+    const custPhoneDigits = normalizePhoneDigits(cust.phone);
+    const profile: CustomerProfile = {
+      id: cust.id,
+      name: cust.name,
+      phone: cust.phone,
+      defaultAddress: cust.defaultAddress,
+      createdAt: cust.createdAt,
+    };
+    const orders = db.orders
+      .filter((o) => doesCustomerOwnLocalOrder(cust, o))
+      .map(sanitizeOrderForLocalPublic);
+    const complaints = db.complaints.filter(
+      (c) =>
+        c.customerId === cust.id ||
+        normalizePhoneDigits(c.phone) === custPhoneDigits
+    );
+    const kasbon = db.kasbon.filter((k) => {
+      const kp = normalizePhoneDigits(k.phone);
+      if (custPhoneDigits && kp) return kp === custPhoneDigits;
+      return k.customerName.trim().toLowerCase() === cust.name.trim().toLowerCase();
+    });
+    return {ok: true, status: 200, storageMode: 'browser', data: {customer: profile, orders, complaints, kasbon}};
+  }
+
+  if (path === '/api/customer/profile' && method === 'PATCH') {
+    const cust = getLocalCustomer(options.headers, db);
+    if (!cust) {
+      return {ok: false, status: 401, storageMode: 'browser', data: {error: 'Silakan masuk.'}};
+    }
+    if (String(body.name || '').trim().length >= 2) cust.name = String(body.name).trim();
+    if (String(body.defaultAddress || '').trim().length >= 4) {
+      cust.defaultAddress = String(body.defaultAddress).trim();
+    }
+    writeLocalDb(db);
+    return {
+      ok: true,
+      status: 200,
+      storageMode: 'browser',
+      data: {
+        customer: {
+          id: cust.id,
+          name: cust.name,
+          phone: cust.phone,
+          defaultAddress: cust.defaultAddress,
+          createdAt: cust.createdAt,
+        },
+      },
+    };
+  }
+
+  if (path === '/api/customer/password' && method === 'PATCH') {
+    const cust = getLocalCustomer(options.headers, db);
+    if (!cust) {
+      return {ok: false, status: 401, storageMode: 'browser', data: {error: 'Silakan masuk.'}};
+    }
+    const currentPasscode = String(body.currentPasscode || '');
+    const newPasscode = String(body.newPasscode || '');
+    if (!(await verifyLocalPasscode(currentPasscode, cust.passcodeHash))) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Kata sandi saat ini tidak cocok.'}};
+    }
+    if (newPasscode.length < 6) {
+      return {ok: false, status: 400, storageMode: 'browser', data: {error: 'Kata sandi baru minimal 6 karakter.'}};
+    }
+    cust.passcodeHash = await hashLocalPasscode(newPasscode);
+    writeLocalDb(db);
+    return {ok: true, status: 200, storageMode: 'browser', data: {updated: true}};
+  }
+
   // --- PUBLIC ---
   if (path === '/api/public/store' && method === 'GET') {
     return {
@@ -505,11 +816,16 @@ async function handleStaticFallback(
   }
 
   if (path === '/api/public/orders' && method === 'POST') {
-    const customerName = String(body.customerName || '').trim();
-    const phone = String(body.phone || '').trim();
+    const loggedInCustomer = getLocalCustomer(options.headers, db);
+    const customerName = String(body.customerName || loggedInCustomer?.name || '').trim();
+    const phone = String(body.phone || loggedInCustomer?.phone || '').trim();
     const deliveryMethod = body.deliveryMethod === 'pickup' ? 'pickup' : 'cod';
-    const addressNote = String(body.addressNote || '').trim();
+    const addressNote = String(
+      body.addressNote || (deliveryMethod === 'cod' ? loggedInCustomer?.defaultAddress : '') || ''
+    ).trim();
     const notes = String(body.notes || '').trim();
+    const paymentMethod: PaymentMethod =
+      body.paymentMethod === 'QRIS' ? 'QRIS' : deliveryMethod === 'cod' ? 'COD' : 'TUNAI';
     const rawItems = Array.isArray(body.items) ? body.items : [];
     const verifiedItems: OrderItem[] = [];
 
@@ -571,13 +887,26 @@ async function handleStaticFallback(
       deliveryMethod === 'cod' && subtotal < db.settings.freeDeliveryMin
         ? db.settings.deliveryFee
         : 0;
+    const grandTotal = subtotal + deliveryFee;
 
     const customerCoords = parseLocalGeoPoint(body.customerCoords);
+    const qris =
+      paymentMethod === 'QRIS'
+        ? buildOrderQrisInfo({
+            orderNumber,
+            amount: grandTotal,
+            merchantName: db.settings.qrisMerchantName,
+            nmid: db.settings.qrisNmid,
+            gatewayStatus: 'PENDING',
+            nowIso: now,
+          })
+        : undefined;
 
     const newOrder: Order = {
       id: randomId('ord'),
       orderNumber,
       source: 'ONLINE',
+      customerId: loggedInCustomer?.id ?? null,
       customerName,
       phone,
       deliveryMethod,
@@ -586,12 +915,14 @@ async function handleStaticFallback(
           ? addressNote
           : 'Ambil langsung di Toko Dimas Jaya (Gang Makam)',
       notes,
-      paymentMethod: deliveryMethod === 'cod' ? 'COD' : 'TUNAI',
+      paymentMethod,
+      paymentStatus: paymentMethod === 'QRIS' ? 'MENUNGGU_QRIS' : 'BELUM_BAYAR',
+      qris,
       status: 'MENUNGGU',
       items: verifiedItems,
       subtotal,
       deliveryFee,
-      total: subtotal + deliveryFee,
+      total: grandTotal,
       handledBy: '',
       courierName: '',
       customerCoords: deliveryMethod === 'cod' ? customerCoords : null,
@@ -606,6 +937,7 @@ async function handleStaticFallback(
               updatedAt: now,
             }
           : undefined,
+      whatsappNotifications: [],
       createdAt: now,
       updatedAt: now,
     };
@@ -615,8 +947,50 @@ async function handleStaticFallback(
       ok: true,
       status: 201,
       storageMode: 'browser',
-      data: {order: sanitizeOrderForLocalRole(newOrder)},
+      data: {order: sanitizeOrderForLocalPublic(newOrder)},
     };
+  }
+
+  if (
+    path.startsWith('/api/public/orders/') &&
+    path.endsWith('/qris-pay') &&
+    method === 'POST'
+  ) {
+    const orderNumber = path.split('/')[4]?.toUpperCase();
+    const loggedInCustomer = getLocalCustomer(options.headers, db);
+    const phoneLast4 = String(body.phoneLast4 || '').replace(/\D/g, '').slice(-4);
+    const order = db.orders.find((o) => o.orderNumber.toUpperCase() === orderNumber);
+    if (!order) {
+      return {ok: false, status: 404, storageMode: 'browser', data: {error: 'Pesanan tidak ditemukan.'}};
+    }
+    const ownsByToken = loggedInCustomer && doesCustomerOwnLocalOrder(loggedInCustomer, order);
+    const ownsByPhone = phoneLast4.length === 4 && order.phone.replace(/\D/g, '').endsWith(phoneLast4);
+    if (!ownsByToken && !ownsByPhone) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Verifikasi pelanggan tidak cocok.'}};
+    }
+    if (order.paymentMethod !== 'QRIS' || !order.qris) {
+      return {ok: false, status: 400, storageMode: 'browser', data: {error: 'Bukan pesanan QRIS.'}};
+    }
+    const now = new Date().toISOString();
+    order.qris.gatewayStatus = 'PAID';
+    order.qris.paidAt = now;
+    order.paymentStatus = 'LUNAS';
+    order.updatedAt = now;
+    if (!db.ledger.some((l) => l.description.includes(`#${order.orderNumber}`))) {
+      db.ledger.unshift({
+        id: randomId('ldg'),
+        type: 'MASUK',
+        category: order.deliveryMethod === 'cod' ? 'Penjualan COD (QRIS)' : 'Penjualan QRIS',
+        description: `Pembayaran QRIS #${order.orderNumber} (${order.customerName})`,
+        amount: order.total,
+        paymentMethod: 'QRIS',
+        actorName: 'Payment Gateway QRIS',
+        createdAt: now,
+      });
+    }
+    appendLocalWhatsappNotification(order, 'QRIS_LUNAS', 'Sistem QRIS Otomatis');
+    writeLocalDb(db);
+    return {ok: true, status: 200, storageMode: 'browser', data: {order: sanitizeOrderForLocalPublic(order)}};
   }
 
   if (path === '/api/public/orders/track' && method === 'GET') {
@@ -624,11 +998,12 @@ async function handleStaticFallback(
     const phoneSuffix = String(parsedUrl.searchParams.get('phone') || '')
       .replace(/\D/g, '')
       .slice(-4);
-    const order = db.orders.find(
-      (o) =>
-        o.orderNumber.toUpperCase() === code &&
-        o.phone.replace(/\D/g, '').endsWith(phoneSuffix)
-    );
+    const loggedInCustomer = getLocalCustomer(options.headers, db);
+    const order = db.orders.find((o) => {
+      if (o.orderNumber.toUpperCase() !== code) return false;
+      if (loggedInCustomer && doesCustomerOwnLocalOrder(loggedInCustomer, o)) return true;
+      return phoneSuffix.length >= 4 && o.phone.replace(/\D/g, '').endsWith(phoneSuffix);
+    });
     if (!order) {
       return {
         ok: false,
@@ -637,15 +1012,119 @@ async function handleStaticFallback(
         data: {error: 'Pesanan tidak ditemukan atau 4 digit terakhir nomor HP tidak cocok.'},
       };
     }
+    const complaints = db.complaints.filter((c) => c.orderId === order.id);
     return {
       ok: true,
       status: 200,
       storageMode: 'browser',
       data: {
         storeCoords: db.settings.storeCoords || null,
-        order: sanitizeOrderForLocalRole(order),
+        order: sanitizeOrderForLocalPublic(order),
+        complaints,
       },
     };
+  }
+
+  if (
+    path.startsWith('/api/public/orders/') &&
+    path.endsWith('/cancel') &&
+    method === 'POST'
+  ) {
+    const orderNumber = path.split('/')[4]?.toUpperCase();
+    const loggedInCustomer = getLocalCustomer(options.headers, db);
+    const phoneLast4 = String(body.phoneLast4 || '').replace(/\D/g, '').slice(-4);
+    const order = db.orders.find((o) => o.orderNumber.toUpperCase() === orderNumber);
+    if (!order) {
+      return {ok: false, status: 404, storageMode: 'browser', data: {error: 'Pesanan tidak ditemukan.'}};
+    }
+    const ownsByToken = loggedInCustomer && doesCustomerOwnLocalOrder(loggedInCustomer, order);
+    const ownsByPhone = phoneLast4.length === 4 && order.phone.replace(/\D/g, '').endsWith(phoneLast4);
+    if (!ownsByToken && !ownsByPhone) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Verifikasi pemilik pesanan gagal.'}};
+    }
+    if (order.status !== 'MENUNGGU') {
+      return {
+        ok: false,
+        status: 409,
+        storageMode: 'browser',
+        data: {error: 'Pesanan yang sudah disiapkan atau diantar tidak dapat dibatalkan mandiri.'},
+      };
+    }
+    const now = new Date().toISOString();
+    order.status = 'DIBATALKAN';
+    order.updatedAt = now;
+    if (body.reason) {
+      order.notes = [order.notes, `Batal pelanggan: ${String(body.reason).trim()}`].filter(Boolean).join(' · ');
+    }
+    for (const item of order.items) {
+      const product = db.products.find((p) => p.id === item.productId);
+      const variant = product?.variants.find((v) => v.id === item.variantId);
+      if (product && variant) {
+        variant.stock += item.quantity;
+        syncProductAvailability(product);
+        db.stockMovements.unshift({
+          id: randomId('stk'),
+          productId: product.id,
+          productName: product.name,
+          variantId: variant.id,
+          variantLabel: variant.label,
+          type: 'MASUK',
+          quantityDelta: item.quantity,
+          note: `Pembatalan mandiri pelanggan #${order.orderNumber}`,
+          actorName: order.customerName,
+          createdAt: now,
+        });
+      }
+    }
+    writeLocalDb(db);
+    return {ok: true, status: 200, storageMode: 'browser', data: {order: sanitizeOrderForLocalPublic(order)}};
+  }
+
+  if (path === '/api/public/complaints' && method === 'POST') {
+    const loggedInCustomer = getLocalCustomer(options.headers, db);
+    const orderNumber = String(body.orderNumber || '').trim().toUpperCase();
+    const phoneLast4 = String(body.phoneLast4 || '').replace(/\D/g, '').slice(-4);
+    const category = body.category as ComplaintCategory;
+    const requestedResolution = body.requestedResolution as ComplaintResolution;
+    const description = String(body.description || '').trim();
+    const evidencePhoto = isValidUploadedPhoto(body.evidencePhoto)
+      ? body.evidencePhoto.trim()
+      : undefined;
+    const order = db.orders.find((o) => o.orderNumber.toUpperCase() === orderNumber);
+    if (!order) {
+      return {ok: false, status: 404, storageMode: 'browser', data: {error: 'Pesanan tidak ditemukan.'}};
+    }
+    const ownsByToken = loggedInCustomer && doesCustomerOwnLocalOrder(loggedInCustomer, order);
+    const ownsByPhone = phoneLast4.length === 4 && order.phone.replace(/\D/g, '').endsWith(phoneLast4);
+    if (!ownsByToken && !ownsByPhone) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Verifikasi pemilik pesanan gagal.'}};
+    }
+    if (description.length < 8) {
+      return {ok: false, status: 400, storageMode: 'browser', data: {error: 'Keterangan komplain minimal 8 karakter.'}};
+    }
+    db.complaintSeq += 1;
+    const now = new Date().toISOString();
+    const complaint: ComplaintRecord = {
+      id: randomId('cmp'),
+      complaintNumber: `KMP-${db.complaintSeq}`,
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      customerId: loggedInCustomer?.id ?? order.customerId ?? null,
+      customerName: order.customerName,
+      phone: order.phone,
+      category,
+      description,
+      evidencePhoto,
+      requestedResolution,
+      status: 'BARU',
+      staffResponse: '',
+      handledBy: '',
+      createdAt: now,
+      updatedAt: now,
+    };
+    db.complaints.unshift(complaint);
+    writeLocalDb(db);
+    return {ok: true, status: 201, storageMode: 'browser', data: {complaint}};
   }
 
   // --- AUTHENTICATED OPS ---
@@ -659,18 +1138,22 @@ async function handleStaticFallback(
     };
   }
 
+  const isLeadership = user.role === 'PEMILIK' || user.role === 'DIREKTUR';
+
   if (path === '/api/ops/bootstrap' && method === 'GET') {
     const role = user.role;
-    const canSeeFinancialOverview = role === 'PEMILIK' || role === 'KEUANGAN';
-    const totalRevenue = db.ledger
-      .filter((l) => l.type === 'MASUK')
-      .reduce((s, l) => s + l.amount, 0);
-    const totalExpense = db.ledger
-      .filter((l) => l.type === 'KELUAR')
-      .reduce((s, l) => s + l.amount, 0);
+    const canSeeFinancialOverview = isLeadership || role === 'KEUANGAN';
+    const totalRevenue = db.ledger.filter((l) => l.type === 'MASUK').reduce((s, l) => s + l.amount, 0);
+    const totalExpense = db.ledger.filter((l) => l.type === 'KELUAR').reduce((s, l) => s + l.amount, 0);
+    const estimatedProfit = db.orders
+      .filter((o) => o.status === 'SELESAI')
+      .reduce((os, ord) => {
+        const g = ord.items.reduce((is, i) => is + (i.unitPrice - (i.costPrice || 0)) * i.quantity, 0);
+        return os + g - (ord.discountAmount || 0);
+      }, 0);
 
     let scopedProducts: Product[] = [];
-    if (role === 'PEMILIK' || role === 'GUDANG') {
+    if (isLeadership || role === 'GUDANG') {
       scopedProducts = db.products;
     } else if (role === 'KASIR' || role === 'PEMASOK') {
       scopedProducts = db.products.map((p) => ({
@@ -680,27 +1163,18 @@ async function handleStaticFallback(
     }
 
     let scopedOrders: Order[] = [];
-    if (role === 'PEMILIK') {
-      scopedOrders = db.orders;
-    } else if (role === 'KASIR') {
-      scopedOrders = db.orders.map(sanitizeOrderForLocalRole);
-    } else if (role === 'GUDANG') {
-      scopedOrders = db.orders
-        .filter((o) => o.source === 'ONLINE')
-        .map(sanitizeOrderForLocalRole);
-    } else if (role === 'KURIR') {
-      scopedOrders = db.orders
-        .filter((o) => o.deliveryMethod === 'cod')
-        .map(sanitizeOrderForLocalRole);
-    }
+    if (isLeadership) scopedOrders = db.orders;
+    else if (role === 'KASIR') scopedOrders = db.orders.map(sanitizeOrderForLocalRole);
+    else if (role === 'GUDANG')
+      scopedOrders = db.orders.filter((o) => o.source === 'ONLINE').map(sanitizeOrderForLocalRole);
+    else if (role === 'KURIR')
+      scopedOrders = db.orders.filter((o) => o.deliveryMethod === 'cod').map(sanitizeOrderForLocalRole);
 
     let scopedSupplierDeliveries: SupplierDelivery[] = [];
-    if (role === 'PEMILIK' || role === 'GUDANG') {
+    if (isLeadership || role === 'GUDANG' || role === 'KEUANGAN') {
       scopedSupplierDeliveries = db.supplierDeliveries;
     } else if (role === 'PEMASOK') {
-      scopedSupplierDeliveries = db.supplierDeliveries.filter(
-        (d) => d.supplierId === user.id
-      );
+      scopedSupplierDeliveries = db.supplierDeliveries.filter((d) => d.supplierId === user.id);
     }
 
     return {
@@ -714,54 +1188,62 @@ async function handleStaticFallback(
           totalRevenue: canSeeFinancialOverview ? totalRevenue : 0,
           totalExpense: canSeeFinancialOverview ? totalExpense : 0,
           netCash: canSeeFinancialOverview ? totalRevenue - totalExpense : 0,
+          estimatedProfit: isLeadership ? estimatedProfit : 0,
           pendingOrdersCount:
-            role === 'PEMILIK' || role === 'KASIR' || role === 'GUDANG'
-              ? db.orders.filter(
-                  (o) => o.status === 'MENUNGGU' || o.status === 'DISIAPKAN'
-                ).length
+            isLeadership || role === 'KASIR' || role === 'GUDANG'
+              ? db.orders.filter((o) => o.status === 'MENUNGGU' || o.status === 'DISIAPKAN').length
               : 0,
           activeDeliveriesCount:
-            role === 'PEMILIK' || role === 'KURIR'
-              ? db.orders.filter((o) => o.deliveryMethod === 'cod' && o.status === 'DIANTAR')
-                  .length
+            isLeadership || role === 'KURIR'
+              ? db.orders.filter((o) => o.deliveryMethod === 'cod' && o.status === 'DIANTAR').length
               : 0,
           lowStockCount:
-            role === 'PEMILIK' || role === 'GUDANG' || role === 'PEMASOK'
-              ? db.products.reduce(
-                  (c, p) => c + p.variants.filter((v) => v.stock <= v.minStock).length,
-                  0
-                )
+            isLeadership || role === 'GUDANG' || role === 'PEMASOK'
+              ? db.products.reduce((c, p) => c + p.variants.filter((v) => v.stock <= v.minStock).length, 0)
               : 0,
           totalKasbonOutstanding: canSeeFinancialOverview
             ? db.kasbon.reduce((s, k) => s + Math.max(0, k.amountDue - k.totalPaid), 0)
             : 0,
-          totalOrders: role === 'PEMILIK' || role === 'KASIR' ? db.orders.length : 0,
+          totalOrders: isLeadership || role === 'KASIR' ? db.orders.length : 0,
           pendingSupplierDeliveriesCount:
-            role === 'PEMILIK' || role === 'GUDANG' || role === 'PEMASOK'
+            isLeadership || role === 'GUDANG' || role === 'PEMASOK'
               ? db.supplierDeliveries.filter((d) => d.status === 'MENUNGGU_TERIMA').length
+              : 0,
+          pendingComplaintsCount:
+            isLeadership || role === 'KASIR' || role === 'GUDANG'
+              ? db.complaints.filter((c) => c.status === 'BARU' || c.status === 'DIPROSES').length
+              : 0,
+          openShiftsCount:
+            isLeadership || role === 'KASIR'
+              ? db.shifts.filter((s) => s.status === 'TERBUKA').length
               : 0,
         },
         products: scopedProducts,
         orders: scopedOrders,
-        stockMovements:
-          role === 'PEMILIK' || role === 'GUDANG' ? db.stockMovements.slice(0, 60) : [],
-        ledger: canSeeFinancialOverview ? db.ledger.slice(0, 80) : [],
-        kasbon:
-          role === 'PEMILIK' || role === 'KEUANGAN' || role === 'KASIR' ? db.kasbon : [],
+        stockMovements: isLeadership || role === 'GUDANG' ? db.stockMovements.slice(0, 80) : [],
+        ledger: canSeeFinancialOverview ? db.ledger.slice(0, 120) : [],
+        kasbon: isLeadership || role === 'KEUANGAN' || role === 'KASIR' ? db.kasbon : [],
         supplierDeliveries: scopedSupplierDeliveries,
-        staff:
-          role === 'PEMILIK'
-            ? db.staff.map(({passcodeHash: _h, ...rest}) => rest)
+        complaints: isLeadership || role === 'KASIR' || role === 'GUDANG' ? db.complaints : [],
+        shifts: isLeadership || role === 'KASIR' || role === 'KEUANGAN' ? db.shifts.slice(0, 30) : [],
+        auditLogs: isLeadership ? db.auditLogs.slice(0, 80) : [],
+        couriers:
+          isLeadership || role === 'KASIR' || role === 'KURIR'
+            ? db.staff
+                .filter((s) => s.active && s.role === 'KURIR')
+                .map(({passcodeHash: _h, ...rest}) => rest)
             : [],
+        staff: isLeadership ? db.staff.map(({passcodeHash: _h, ...rest}) => rest) : [],
       },
     };
   }
 
   if (path === '/api/ops/settings' && method === 'PATCH') {
-    if (user.role !== 'PEMILIK') {
-      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Khusus Pemilik.'}};
+    if (!isLeadership) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Khusus Pemilik / Direktur.'}};
     }
     const parsedCoords = parseLocalGeoPoint(body.storeCoords);
+    const isOwner = user.role === 'PEMILIK';
     db.settings = {
       ...db.settings,
       hours: String(body.hours || db.settings.hours).trim(),
@@ -769,18 +1251,24 @@ async function handleStaticFallback(
       deliveryArea: String(body.deliveryArea || db.settings.deliveryArea).trim(),
       deliveryFee: Math.max(0, Number(body.deliveryFee ?? db.settings.deliveryFee)),
       freeDeliveryMin: Math.max(0, Number(body.freeDeliveryMin ?? db.settings.freeDeliveryMin)),
+      whatsappNumber: String(body.whatsappNumber ?? db.settings.whatsappNumber ?? '6281279008899').trim(),
+      qrisMerchantName: isOwner
+        ? String(body.qrisMerchantName ?? db.settings.qrisMerchantName ?? 'TOKO DIMAS JAYA').trim()
+        : db.settings.qrisMerchantName,
+      qrisNmid: isOwner
+        ? String(body.qrisNmid ?? db.settings.qrisNmid ?? 'ID1020260000188').trim()
+        : db.settings.qrisNmid,
       storeCoords:
-        body.storeCoords === null
-          ? null
-          : parsedCoords ?? db.settings.storeCoords ?? null,
+        body.storeCoords === null ? null : parsedCoords ?? db.settings.storeCoords ?? null,
     };
+    recordLocalAuditLog(db, user, 'UBAH_PENGATURAN', 'StoreSettings', 'Perbarui pengaturan toko');
     writeLocalDb(db);
     return {ok: true, status: 200, storageMode: 'browser', data: {settings: db.settings}};
   }
 
   if (path === '/api/ops/staff' && method === 'POST') {
-    if (user.role !== 'PEMILIK') {
-      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Khusus Pemilik.'}};
+    if (!isLeadership) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Khusus Pemilik / Direktur.'}};
     }
     const displayName = String(body.displayName || '').trim();
     const username = String(body.username || '')
@@ -789,7 +1277,7 @@ async function handleStaticFallback(
       .replace(/[^a-z0-9._-]/g, '');
     const role = body.role as DivisionRole;
     const passcode = String(body.passcode || '');
-    if (displayName.length < 2 || username.length < 3 || passcode.length < 6) {
+    if (displayName.length < 2 || username.length < 3 || !VALID_ROLES.includes(role) || passcode.length < 6) {
       return {
         ok: false,
         status: 400,
@@ -797,13 +1285,16 @@ async function handleStaticFallback(
         data: {error: 'Lengkapi nama, username min. 3 karakter, dan sandi min. 6 karakter.'},
       };
     }
-    if (db.staff.some((s) => s.username.toLowerCase() === username)) {
+    if (user.role === 'DIREKTUR' && !DIRECTOR_MANAGED_ROLES.includes(role)) {
       return {
         ok: false,
-        status: 409,
+        status: 403,
         storageMode: 'browser',
-        data: {error: 'Username sudah dipakai oleh staf lain.'},
+        data: {error: 'Direktur hanya dapat membuat akun staf divisi di bawahnya.'},
       };
+    }
+    if (db.staff.some((s) => s.username.toLowerCase() === username)) {
+      return {ok: false, status: 409, storageMode: 'browser', data: {error: 'Username sudah dipakai.'}};
     }
     const member: LocalStaffRecord = {
       id: randomId('stf'),
@@ -815,30 +1306,94 @@ async function handleStaticFallback(
       createdAt: new Date().toISOString(),
     };
     db.staff.push(member);
+    recordLocalAuditLog(db, user, 'TAMBAH_STAF', username, `Tambah ${displayName} (${role})`);
     writeLocalDb(db);
     const {passcodeHash: _h, ...publicMember} = member;
     return {ok: true, status: 201, storageMode: 'browser', data: {staff: publicMember}};
   }
 
   if (path.startsWith('/api/ops/staff/') && method === 'PATCH') {
-    if (user.role !== 'PEMILIK') {
-      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Khusus Pemilik.'}};
+    if (!isLeadership) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Khusus Pemilik / Direktur.'}};
     }
     const targetId = path.split('/').pop();
     const target = db.staff.find((s) => s.id === targetId);
     if (!target) {
       return {ok: false, status: 404, storageMode: 'browser', data: {error: 'Staf tidak ditemukan.'}};
     }
+    if (user.role === 'DIREKTUR' && !DIRECTOR_MANAGED_ROLES.includes(target.role)) {
+      return {
+        ok: false,
+        status: 403,
+        storageMode: 'browser',
+        data: {error: 'Direktur tidak dapat mengubah akun Pemilik atau Direktur.'},
+      };
+    }
     if (typeof body.active === 'boolean') target.active = body.active;
+    if (body.role && VALID_ROLES.includes(body.role)) {
+      if (user.role === 'DIREKTUR' && !DIRECTOR_MANAGED_ROLES.includes(body.role)) {
+        return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Akses role ditolak.'}};
+      }
+      target.role = body.role;
+    }
+    if (typeof body.displayName === 'string') {
+      const nextName = body.displayName.trim();
+      if (nextName.length < 2) {
+        return {ok: false, status: 400, storageMode: 'browser', data: {error: 'Nama staf minimal 2 karakter.'}};
+      }
+      target.displayName = nextName;
+    }
+    if (typeof body.username === 'string') {
+      const nextUsername = body.username
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9._-]/g, '');
+      if (nextUsername.length < 3) {
+        return {ok: false, status: 400, storageMode: 'browser', data: {error: 'Username minimal 3 karakter.'}};
+      }
+      if (db.staff.some((s) => s.id !== target.id && s.username.toLowerCase() === nextUsername)) {
+        return {ok: false, status: 409, storageMode: 'browser', data: {error: 'Username sudah dipakai.'}};
+      }
+      target.username = nextUsername;
+    }
     if (typeof body.passcode === 'string' && body.passcode.length >= 6) {
       target.passcodeHash = await hashLocalPasscode(body.passcode);
     }
+    recordLocalAuditLog(db, user, 'UBAH_STAF', target.username, `Update ${target.displayName}`);
     writeLocalDb(db);
     const {passcodeHash: _h, ...publicMember} = target;
     return {ok: true, status: 200, storageMode: 'browser', data: {staff: publicMember}};
   }
 
+  if (path.startsWith('/api/ops/staff/') && method === 'DELETE') {
+    if (!isLeadership) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Khusus Pemilik / Direktur.'}};
+    }
+    const targetId = path.split('/').pop();
+    const idx = db.staff.findIndex((s) => s.id === targetId);
+    if (idx === -1) {
+      return {ok: false, status: 404, storageMode: 'browser', data: {error: 'Staf tidak ditemukan.'}};
+    }
+    const target = db.staff[idx];
+    if (target.id === user.id) {
+      return {ok: false, status: 400, storageMode: 'browser', data: {error: 'Tidak dapat menghapus akun sendiri.'}};
+    }
+    if (user.role === 'DIREKTUR' && !DIRECTOR_MANAGED_ROLES.includes(target.role)) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Direktur tidak dapat menghapus akun Pemilik atau Direktur.'}};
+    }
+    if (target.role === 'PEMILIK' && db.staff.filter((s) => s.role === 'PEMILIK' && s.active).length <= 1) {
+      return {ok: false, status: 400, storageMode: 'browser', data: {error: 'Minimal satu akun Pemilik aktif harus tersedia.'}};
+    }
+    db.staff.splice(idx, 1);
+    recordLocalAuditLog(db, user, 'HAPUS_STAF', target.username, `Hapus ${target.displayName}`);
+    writeLocalDb(db);
+    return {ok: true, status: 200, storageMode: 'browser', data: {deletedId: target.id}};
+  }
+
   if (path === '/api/ops/pos' && method === 'POST') {
+    if (!isLeadership && user.role !== 'KASIR') {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Khusus Kasir / Pimpinan.'}};
+    }
     const customerName = String(body.customerName || 'Pembeli Toko').trim();
     const phone = String(body.phone || '-').trim();
     const paymentMethod = (body.paymentMethod || 'TUNAI') as PaymentMethod;
@@ -869,6 +1424,10 @@ async function handleStaticFallback(
       });
     }
 
+    const subtotal = verifiedItems.reduce((s, i) => s + i.unitPrice * i.quantity, 0);
+    const discountAmount = Math.min(subtotal, Math.max(0, Math.round(Number(body.discountAmount || 0))));
+    const total = Math.max(0, subtotal - discountAmount);
+
     const now = new Date().toISOString();
     for (const item of verifiedItems) {
       const product = db.products.find((p) => p.id === item.productId)!;
@@ -891,7 +1450,18 @@ async function handleStaticFallback(
 
     db.orderSeq += 1;
     const orderNumber = `DJ-${db.orderSeq}`;
-    const total = verifiedItems.reduce((s, i) => s + i.unitPrice * i.quantity, 0);
+    const qris =
+      paymentMethod === 'QRIS'
+        ? buildOrderQrisInfo({
+            orderNumber,
+            amount: Math.max(100, total),
+            merchantName: db.settings.qrisMerchantName,
+            nmid: db.settings.qrisNmid,
+            gatewayStatus: 'PAID',
+            nowIso: now,
+          })
+        : undefined;
+
     const posOrder: Order = {
       id: randomId('ord'),
       orderNumber,
@@ -902,9 +1472,12 @@ async function handleStaticFallback(
       addressNote: 'Belanja langsung di Toko Dimas Jaya',
       notes,
       paymentMethod,
+      paymentStatus: paymentMethod === 'KASBON' ? 'KASBON' : 'LUNAS',
+      qris,
+      discountAmount,
       status: 'SELESAI',
       items: verifiedItems,
-      subtotal: total,
+      subtotal,
       deliveryFee: 0,
       total,
       handledBy: user.displayName,
@@ -936,17 +1509,63 @@ async function handleStaticFallback(
         actorName: user.displayName,
         createdAt: now,
       });
+      const activeShift = db.shifts.find((s) => s.status === 'TERBUKA');
+      if (activeShift) {
+        if (paymentMethod === 'QRIS') activeShift.qrisSalesTotal += total;
+        else activeShift.expectedCash += total;
+      }
     }
     writeLocalDb(db);
     return {ok: true, status: 201, storageMode: 'browser', data: {order: posOrder}};
   }
 
-  if (path.startsWith('/api/ops/orders/') && path.endsWith('/status') && method === 'PATCH') {
-    if (!['PEMILIK', 'KASIR', 'GUDANG', 'KURIR'].includes(user.role)) {
+  if (path === '/api/ops/shifts/open' && method === 'POST') {
+    if (!isLeadership && user.role !== 'KASIR') {
       return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Akses ditolak.'}};
     }
-    const segments = path.split('/');
-    const orderId = segments[4];
+    if (db.shifts.some((s) => s.status === 'TERBUKA')) {
+      return {ok: false, status: 409, storageMode: 'browser', data: {error: 'Masih ada shift terbuka.'}};
+    }
+    const openingCash = Math.max(0, Math.round(Number(body.openingCash || 0)));
+    const shift: CashierShift = {
+      id: randomId('shf'),
+      cashierId: user.id,
+      cashierName: user.displayName,
+      openedAt: new Date().toISOString(),
+      openingCash,
+      expectedCash: openingCash,
+      qrisSalesTotal: 0,
+      note: String(body.note || 'Buka laci kasir'),
+      status: 'TERBUKA',
+    };
+    db.shifts.unshift(shift);
+    writeLocalDb(db);
+    return {ok: true, status: 201, storageMode: 'browser', data: {shift}};
+  }
+
+  if (path === '/api/ops/shifts/close' && method === 'POST') {
+    if (!isLeadership && user.role !== 'KASIR') {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Akses ditolak.'}};
+    }
+    const shift = db.shifts.find((s) => s.status === 'TERBUKA');
+    if (!shift) {
+      return {ok: false, status: 404, storageMode: 'browser', data: {error: 'Tidak ada shift terbuka.'}};
+    }
+    const countedCash = Math.max(0, Math.round(Number(body.countedCash ?? shift.expectedCash)));
+    shift.countedCash = countedCash;
+    shift.discrepancy = countedCash - shift.expectedCash;
+    shift.closedAt = new Date().toISOString();
+    shift.status = 'DITUTUP';
+    if (body.note) shift.note = `${shift.note} · Tutup: ${String(body.note)}`;
+    writeLocalDb(db);
+    return {ok: true, status: 200, storageMode: 'browser', data: {shift}};
+  }
+
+  if (path.startsWith('/api/ops/orders/') && path.endsWith('/status') && method === 'PATCH') {
+    if (!['PEMILIK', 'DIREKTUR', 'KASIR', 'GUDANG', 'KURIR'].includes(user.role)) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Akses ditolak.'}};
+    }
+    const orderId = path.split('/')[4];
     const nextStatus = body.status as OrderStatus;
     const order = db.orders.find((o) => o.id === orderId);
     if (!order) {
@@ -988,12 +1607,18 @@ async function handleStaticFallback(
           courierCoords: order.tracking?.courierCoords ?? db.settings.storeCoords ?? null,
           updatedAt: now,
         };
+        appendLocalWhatsappNotification(order, 'DIANTAR', user.displayName);
       } else if (nextStatus === 'SELESAI') {
+        const uploadedProofPhoto = isValidUploadedPhoto(body.proofPhoto)
+          ? body.proofPhoto.trim()
+          : order.tracking?.proofPhoto;
         order.tracking = {
           checkpoint: 'SUDAH_TIBA',
           locationNote: 'Kurir sudah tiba & pesanan COD selesai diserahkan',
           progressPercent: 100,
           etaMinutes: 0,
+          proofNote: String(body.proofNote || order.tracking?.proofNote || '').trim() || undefined,
+          proofPhoto: uploadedProofPhoto,
           courierCoords:
             order.customerCoords ?? order.tracking?.courierCoords ?? db.settings.storeCoords ?? null,
           updatedAt: now,
@@ -1011,6 +1636,11 @@ async function handleStaticFallback(
       }
     }
     if (nextStatus === 'SELESAI' && prevStatus !== 'SELESAI') {
+      order.paymentStatus = 'LUNAS';
+      if (order.qris && order.qris.gatewayStatus === 'PENDING') {
+        order.qris.gatewayStatus = 'PAID';
+        order.qris.paidAt = now;
+      }
       if (!db.ledger.some((l) => l.description.includes(`#${order.orderNumber}`))) {
         db.ledger.unshift({
           id: randomId('ldg'),
@@ -1028,9 +1658,79 @@ async function handleStaticFallback(
     return {ok: true, status: 200, storageMode: 'browser', data: {order}};
   }
 
+  if (path.startsWith('/api/ops/orders/') && path.endsWith('/qris-confirm') && method === 'PATCH') {
+    if (!['PEMILIK', 'DIREKTUR', 'KASIR', 'KEUANGAN'].includes(user.role)) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Akses ditolak.'}};
+    }
+    const orderId = path.split('/')[4];
+    const order = db.orders.find((o) => o.id === orderId);
+    if (!order) return {ok: false, status: 404, storageMode: 'browser', data: {error: 'Pesanan tidak ditemukan.'}};
+    const now = new Date().toISOString();
+    order.paymentStatus = 'LUNAS';
+    if (order.qris) {
+      order.qris.gatewayStatus = 'PAID';
+      order.qris.paidAt = now;
+    }
+    if (!db.ledger.some((l) => l.description.includes(`#${order.orderNumber}`))) {
+      db.ledger.unshift({
+        id: randomId('ldg'),
+        type: 'MASUK',
+        category: 'Penjualan QRIS',
+        description: `Verifikasi QRIS #${order.orderNumber} (${order.customerName})`,
+        amount: order.total,
+        paymentMethod: 'QRIS',
+        actorName: user.displayName,
+        createdAt: now,
+      });
+    }
+    appendLocalWhatsappNotification(order, 'QRIS_LUNAS', user.displayName);
+    writeLocalDb(db);
+    return {ok: true, status: 200, storageMode: 'browser', data: {order}};
+  }
+
+  if (path.startsWith('/api/ops/orders/') && path.endsWith('/whatsapp') && method === 'POST') {
+    const orderId = path.split('/')[4];
+    const order = db.orders.find((o) => o.id === orderId);
+    if (!order) return {ok: false, status: 404, storageMode: 'browser', data: {error: 'Pesanan tidak ditemukan.'}};
+    const notification = appendLocalWhatsappNotification(
+      order,
+      body.trigger || 'DIANTAR',
+      user.displayName
+    );
+    writeLocalDb(db);
+    return {ok: true, status: 201, storageMode: 'browser', data: {notification, order}};
+  }
+
+  if (path.startsWith('/api/ops/orders/') && path.endsWith('/assign-courier') && method === 'PATCH') {
+    if (!['PEMILIK', 'DIREKTUR', 'KASIR'].includes(user.role)) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Khusus Kasir / Pimpinan.'}};
+    }
+    const orderId = path.split('/')[4];
+    const order = db.orders.find((o) => o.id === orderId);
+    if (!order || order.deliveryMethod !== 'cod') {
+      return {ok: false, status: 404, storageMode: 'browser', data: {error: 'Pesanan COD tidak ditemukan.'}};
+    }
+    const courierId = String(body.courierId || '').trim();
+    if (!courierId) {
+      order.assignedCourierId = undefined;
+      order.assignedCourierName = undefined;
+    } else {
+      const courier = db.staff.find((s) => s.id === courierId && s.active && s.role === 'KURIR');
+      if (!courier) {
+        return {ok: false, status: 404, storageMode: 'browser', data: {error: 'Kurir tidak ditemukan.'}};
+      }
+      order.assignedCourierId = courier.id;
+      order.assignedCourierName = courier.displayName;
+      if (!order.courierName) order.courierName = courier.displayName;
+    }
+    order.updatedAt = new Date().toISOString();
+    writeLocalDb(db);
+    return {ok: true, status: 200, storageMode: 'browser', data: {order}};
+  }
+
   if (path.startsWith('/api/ops/orders/') && path.endsWith('/tracking') && method === 'PATCH') {
-    if (!['PEMILIK', 'KURIR'].includes(user.role)) {
-      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Khusus Kurir / Pemilik.'}};
+    if (!['PEMILIK', 'DIREKTUR', 'KURIR'].includes(user.role)) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Khusus Kurir / Pimpinan.'}};
     }
     const orderId = path.split('/')[4];
     const order = db.orders.find((o) => o.id === orderId);
@@ -1046,8 +1746,12 @@ async function handleStaticFallback(
     };
     const now = new Date().toISOString();
     const parsedCoords = parseLocalGeoPoint(body.courierCoords);
+    const uploadedProofPhoto = isValidUploadedPhoto(body.proofPhoto)
+      ? body.proofPhoto.trim()
+      : order.tracking?.proofPhoto;
     order.courierName = order.courierName || user.displayName;
     order.updatedAt = now;
+    let transitioned = false;
     if (
       (checkpoint === 'MENUJU_LOKASI' ||
         checkpoint === 'DEKAT_TUJUAN' ||
@@ -1055,6 +1759,7 @@ async function handleStaticFallback(
       (order.status === 'MENUNGGU' || order.status === 'DISIAPKAN')
     ) {
       order.status = 'DIANTAR';
+      transitioned = true;
     }
     order.tracking = {
       checkpoint,
@@ -1065,12 +1770,13 @@ async function handleStaticFallback(
       etaMinutes: Number.isFinite(Number(body.etaMinutes))
         ? Math.max(0, Math.round(Number(body.etaMinutes)))
         : order.tracking?.etaMinutes,
+      proofNote: String(body.proofNote || order.tracking?.proofNote || '').trim() || undefined,
+      proofPhoto: uploadedProofPhoto,
       courierCoords:
-        body.courierCoords === null
-          ? null
-          : parsedCoords ?? order.tracking?.courierCoords ?? null,
+        body.courierCoords === null ? null : parsedCoords ?? order.tracking?.courierCoords ?? null,
       updatedAt: now,
     };
+    if (transitioned) appendLocalWhatsappNotification(order, 'DIANTAR', user.displayName);
     writeLocalDb(db);
     return {ok: true, status: 200, storageMode: 'browser', data: {order}};
   }
@@ -1079,9 +1785,12 @@ async function handleStaticFallback(
     const name = String(body.name || '').trim();
     const category = body.category as Exclude<ProductCategory, 'Semua'>;
     const variantLabel = String(body.variantLabel || 'Satuan').trim();
+    const sku = String(body.sku || '').trim() || undefined;
     const price = Math.max(500, Math.round(Number(body.price || 0)));
     const costPrice = Math.max(0, Math.round(Number(body.costPrice || 0)));
     const stock = Math.max(0, Math.floor(Number(body.stock || 0)));
+    const expiryDate = String(body.expiryDate || '').trim() || undefined;
+    const uploadedImage = isValidUploadedPhoto(body.image) ? body.image.trim() : undefined;
     const imageByCategory: Record<string, string> = {
       Sembako: '/src/assets/images/produk_beras_minyak_telur_1795680105474.jpg',
       'Kopi & Gula': '/src/assets/images/produk_kopi_lampung_gula_1795680105852.jpg',
@@ -1097,16 +1806,18 @@ async function handleStaticFallback(
       unitSummary: variantLabel,
       availability: stock > 0 ? 'Stok Tersedia' : 'Stok Habis',
       description: String(body.description || '').trim() || `${name} tersedia segar di Toko Dimas Jaya.`,
-      image: imageByCategory[category] || imageByCategory.Sembako,
+      image: uploadedImage || imageByCategory[category] || imageByCategory.Sembako,
       imageAlt: name,
       variants: [
         {
           id: variantId,
           label: variantLabel,
+          sku,
           price,
           costPrice: costPrice || Math.round(price * 0.85),
           stock,
           minStock: 5,
+          expiryDate,
         },
       ],
     };
@@ -1116,18 +1827,129 @@ async function handleStaticFallback(
     return {ok: true, status: 201, storageMode: 'browser', data: {product: newProduct}};
   }
 
+  if (path.startsWith('/api/ops/products/') && path.endsWith('/variants') && method === 'POST') {
+    const productId = path.split('/')[4];
+    const product = db.products.find((p) => p.id === productId);
+    if (!product) return {ok: false, status: 404, storageMode: 'browser', data: {error: 'Produk tidak ditemukan.'}};
+    const label = String(body.label || '').trim();
+    const sku = String(body.sku || '').trim() || undefined;
+    const price = Math.max(500, Math.round(Number(body.price || 0)));
+    const costPrice = Math.max(0, Math.round(Number(body.costPrice || 0)));
+    const stock = Math.max(0, Math.floor(Number(body.stock || 0)));
+    const expiryDate = String(body.expiryDate || '').trim() || undefined;
+    product.variants.push({
+      id: randomId('var'),
+      label,
+      sku,
+      price,
+      costPrice: costPrice || Math.round(price * 0.85),
+      stock,
+      minStock: Math.max(1, Math.floor(Number(body.minStock || 5))),
+      expiryDate,
+    });
+    product.unitSummary = product.variants.map((v) => v.label).join(' · ');
+    syncProductAvailability(product);
+    writeLocalDb(db);
+    return {ok: true, status: 201, storageMode: 'browser', data: {product}};
+  }
+
+  if (path.startsWith('/api/ops/products/') && path.includes('/variant/') && method === 'PATCH') {
+    const segments = path.split('/');
+    const productId = segments[4];
+    const variantId = segments[6];
+    const product = db.products.find((p) => p.id === productId);
+    const variant = product?.variants.find((v) => v.id === variantId);
+    if (!product || !variant) return {ok: false, status: 404, storageMode: 'browser', data: {error: 'Tidak ditemukan.'}};
+    if (body.label) {
+      variant.label = String(body.label).trim();
+      product.unitSummary = product.variants.map((v) => v.label).join(' · ');
+    }
+    if (body.sku !== undefined) variant.sku = String(body.sku || '').trim() || undefined;
+    if (body.price !== undefined) variant.price = Math.max(500, Math.round(Number(body.price)));
+    if (body.costPrice !== undefined) variant.costPrice = Math.max(0, Math.round(Number(body.costPrice)));
+    if (body.minStock !== undefined) variant.minStock = Math.max(0, Math.floor(Number(body.minStock)));
+    if (body.expiryDate !== undefined) variant.expiryDate = String(body.expiryDate || '').trim() || undefined;
+    syncProductAvailability(product);
+    writeLocalDb(db);
+    return {ok: true, status: 200, storageMode: 'browser', data: {product}};
+  }
+
+  if (path.startsWith('/api/ops/products/') && path.includes('/variant/') && method === 'DELETE') {
+    const segments = path.split('/');
+    const productId = segments[4];
+    const variantId = segments[6];
+    const product = db.products.find((p) => p.id === productId);
+    if (!product) return {ok: false, status: 404, storageMode: 'browser', data: {error: 'Produk tidak ditemukan.'}};
+    if (product.variants.length <= 1) {
+      return {ok: false, status: 400, storageMode: 'browser', data: {error: 'Minimal harus tersisa 1 varian kemasan.'}};
+    }
+    const idx = product.variants.findIndex((v) => v.id === variantId);
+    if (idx === -1) return {ok: false, status: 404, storageMode: 'browser', data: {error: 'Varian tidak ditemukan.'}};
+    product.variants.splice(idx, 1);
+    product.unitSummary = product.variants.map((v) => v.label).join(' · ');
+    syncProductAvailability(product);
+    writeLocalDb(db);
+    return {ok: true, status: 200, storageMode: 'browser', data: {product}};
+  }
+
+  if (path.startsWith('/api/ops/products/') && path.split('/').length === 5 && method === 'PATCH') {
+    const productId = path.split('/')[4];
+    const product = db.products.find((p) => p.id === productId);
+    if (!product) return {ok: false, status: 404, storageMode: 'browser', data: {error: 'Produk tidak ditemukan.'}};
+    if (String(body.name || '').trim().length >= 2) {
+      product.name = String(body.name).trim();
+      product.imageAlt = product.name;
+    }
+    if (body.category) product.category = body.category;
+    if (String(body.description || '').trim()) product.description = String(body.description).trim();
+    if (isValidUploadedPhoto(body.image)) product.image = body.image.trim();
+    writeLocalDb(db);
+    return {ok: true, status: 200, storageMode: 'browser', data: {product}};
+  }
+
+  if (path.startsWith('/api/ops/products/') && path.split('/').length === 5 && method === 'DELETE') {
+    const productId = path.split('/')[4];
+    const idx = db.products.findIndex((p) => p.id === productId);
+    if (idx === -1) return {ok: false, status: 404, storageMode: 'browser', data: {error: 'Produk tidak ditemukan.'}};
+    const [removed] = db.products.splice(idx, 1);
+    writeLocalDb(db);
+    return {ok: true, status: 200, storageMode: 'browser', data: {deletedId: removed.id}};
+  }
+
   if (path === '/api/ops/stock' && method === 'POST') {
     const product = db.products.find((p) => p.id === body.productId);
     const variant = product?.variants.find((v) => v.id === body.variantId);
     if (!product || !variant) {
       return {ok: false, status: 404, storageMode: 'browser', data: {error: 'Produk tidak ditemukan.'}};
     }
-    const type = body.type === 'OPNAME' ? 'OPNAME' : 'MASUK';
+    const type: 'MASUK' | 'OPNAME' | 'RUSAK' =
+      body.type === 'OPNAME' ? 'OPNAME' : body.type === 'RUSAK' ? 'RUSAK' : 'MASUK';
     const quantity = Math.floor(Number(body.quantity || 0));
-    const delta = type === 'MASUK' ? quantity : quantity - variant.stock;
-    variant.stock = type === 'MASUK' ? variant.stock + quantity : quantity;
+    let delta = 0;
+    if (type === 'MASUK') {
+      if (quantity <= 0) {
+        return {ok: false, status: 400, storageMode: 'browser', data: {error: 'Jumlah stok masuk harus lebih dari 0.'}};
+      }
+      variant.stock += quantity;
+      delta = quantity;
+    } else if (type === 'RUSAK') {
+      if (quantity <= 0 || quantity > variant.stock) {
+        return {ok: false, status: 400, storageMode: 'browser', data: {error: 'Jumlah barang rusak melebihi stok.'}};
+      }
+      variant.stock -= quantity;
+      delta = -quantity;
+    } else {
+      delta = quantity - variant.stock;
+      variant.stock = Math.max(0, quantity);
+    }
     syncProductAvailability(product);
     const now = new Date().toISOString();
+    const defaultNote =
+      type === 'MASUK'
+        ? 'Stok masuk'
+        : type === 'RUSAK'
+          ? 'Barang rusak / kedaluwarsa / susut'
+          : 'Stok opname';
     const movement: StockMovement = {
       id: randomId('stk'),
       productId: product.id,
@@ -1136,7 +1958,7 @@ async function handleStaticFallback(
       variantLabel: variant.label,
       type,
       quantityDelta: delta,
-      note: String(body.note || '').trim() || (type === 'MASUK' ? 'Stok masuk' : 'Stok opname'),
+      note: String(body.note || '').trim() || defaultNote,
       actorName: user.displayName,
       createdAt: now,
     };
@@ -1158,32 +1980,92 @@ async function handleStaticFallback(
   }
 
   if (path === '/api/ops/supplier/deliveries' && method === 'POST') {
-    if (!['PEMILIK', 'PEMASOK'].includes(user.role)) {
-      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Khusus Pemasok / Pemilik.'}};
+    if (!['PEMILIK', 'DIREKTUR', 'PEMASOK'].includes(user.role)) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Khusus Pemasok / Pimpinan.'}};
     }
-    const product = db.products.find((p) => p.id === body.productId);
-    const variant = product?.variants.find((v) => v.id === body.variantId);
-    const quantity = Math.floor(Number(body.quantity || 0));
-    if (!product || !variant || quantity <= 0) {
-      return {ok: false, status: 400, storageMode: 'browser', data: {error: 'Data suplai tidak valid.'}};
+    const rawItems = Array.isArray(body.items) && body.items.length > 0
+      ? body.items
+      : [{productId: body.productId, variantId: body.variantId, quantity: body.quantity, unitCost: body.unitCost}];
+    const invoicePhoto = isValidUploadedPhoto(body.invoicePhoto) ? body.invoicePhoto.trim() : undefined;
+    const batchCode =
+      String(body.batchCode || '').trim() ||
+      (rawItems.length > 1 ? `SJ-${String(Date.now()).slice(-4)}` : undefined);
+    const created: SupplierDelivery[] = [];
+    const now = new Date().toISOString();
+
+    for (const rawItem of rawItems) {
+      const product = db.products.find((p) => p.id === rawItem.productId);
+      const variant = product?.variants.find((v) => v.id === rawItem.variantId);
+      const quantity = Math.floor(Number(rawItem.quantity || 0));
+      if (!product || !variant || quantity <= 0) {
+        return {ok: false, status: 400, storageMode: 'browser', data: {error: 'Data suplai tidak valid.'}};
+      }
+      created.push({
+        id: randomId('sup'),
+        batchCode,
+        supplierId: user.id,
+        supplierName: user.displayName,
+        productId: product.id,
+        productName: product.name,
+        variantId: variant.id,
+        variantLabel: variant.label,
+        quantity,
+        unitCost: Math.max(0, Math.round(Number(rawItem.unitCost || 0))) || variant.costPrice || 0,
+        note: String(body.note || '').trim() || 'Suplai barang masuk ke gudang',
+        invoicePhoto,
+        status: 'MENUNGGU_TERIMA',
+        paymentStatus: body.paymentStatus === 'TEMPO' ? 'TEMPO' : 'TUNAI',
+        dueDate: String(body.dueDate || '').trim() || undefined,
+        createdAt: now,
+      });
     }
-    const delivery: SupplierDelivery = {
-      id: randomId('sup'),
-      supplierId: user.id,
-      supplierName: user.displayName,
-      productId: product.id,
-      productName: product.name,
-      variantId: variant.id,
-      variantLabel: variant.label,
-      quantity,
-      unitCost: Math.max(0, Math.round(Number(body.unitCost || 0))) || variant.costPrice || 0,
-      note: String(body.note || '').trim() || 'Suplai barang masuk ke gudang',
-      status: 'MENUNGGU_TERIMA',
-      createdAt: new Date().toISOString(),
-    };
-    db.supplierDeliveries.unshift(delivery);
+    for (let i = created.length - 1; i >= 0; i -= 1) {
+      db.supplierDeliveries.unshift(created[i]);
+    }
     writeLocalDb(db);
-    return {ok: true, status: 201, storageMode: 'browser', data: {delivery}};
+    return {ok: true, status: 201, storageMode: 'browser', data: {delivery: created[0], deliveries: created}};
+  }
+
+  if (path.startsWith('/api/ops/supplier/deliveries/') && path.split('/').length === 6 && method === 'PATCH') {
+    if (!['PEMILIK', 'DIREKTUR', 'PEMASOK'].includes(user.role)) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Khusus Pemasok / Pimpinan.'}};
+    }
+    const id = path.split('/')[5];
+    const delivery = db.supplierDeliveries.find((d) => d.id === id);
+    if (!delivery) return {ok: false, status: 404, storageMode: 'browser', data: {error: 'Kiriman tidak ditemukan.'}};
+    if (!isLeadership && delivery.supplierId !== user.id) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Bukan kiriman Anda.'}};
+    }
+    if (delivery.status !== 'MENUNGGU_TERIMA') {
+      return {ok: false, status: 409, storageMode: 'browser', data: {error: 'Sudah diterima gudang.'}};
+    }
+    if (body.quantity !== undefined && Number(body.quantity) > 0) delivery.quantity = Math.floor(Number(body.quantity));
+    if (body.unitCost !== undefined && Number(body.unitCost) >= 0) delivery.unitCost = Math.round(Number(body.unitCost));
+    if (typeof body.note === 'string') delivery.note = body.note.trim() || delivery.note;
+    if (body.paymentStatus === 'TEMPO' || body.paymentStatus === 'TUNAI') delivery.paymentStatus = body.paymentStatus;
+    if (body.dueDate !== undefined) delivery.dueDate = String(body.dueDate || '').trim() || undefined;
+    if (isValidUploadedPhoto(body.invoicePhoto)) delivery.invoicePhoto = body.invoicePhoto.trim();
+    writeLocalDb(db);
+    return {ok: true, status: 200, storageMode: 'browser', data: {delivery}};
+  }
+
+  if (path.startsWith('/api/ops/supplier/deliveries/') && path.split('/').length === 6 && method === 'DELETE') {
+    if (!['PEMILIK', 'DIREKTUR', 'PEMASOK'].includes(user.role)) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Khusus Pemasok / Pimpinan.'}};
+    }
+    const id = path.split('/')[5];
+    const idx = db.supplierDeliveries.findIndex((d) => d.id === id);
+    if (idx === -1) return {ok: false, status: 404, storageMode: 'browser', data: {error: 'Kiriman tidak ditemukan.'}};
+    const delivery = db.supplierDeliveries[idx];
+    if (!isLeadership && delivery.supplierId !== user.id) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Bukan kiriman Anda.'}};
+    }
+    if (delivery.status !== 'MENUNGGU_TERIMA') {
+      return {ok: false, status: 409, storageMode: 'browser', data: {error: 'Sudah diterima gudang.'}};
+    }
+    db.supplierDeliveries.splice(idx, 1);
+    writeLocalDb(db);
+    return {ok: true, status: 200, storageMode: 'browser', data: {deletedId: delivery.id}};
   }
 
   if (
@@ -1191,8 +2073,8 @@ async function handleStaticFallback(
     path.endsWith('/receive') &&
     method === 'PATCH'
   ) {
-    if (!['PEMILIK', 'GUDANG'].includes(user.role)) {
-      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Khusus Gudang / Pemilik.'}};
+    if (!['PEMILIK', 'DIREKTUR', 'GUDANG'].includes(user.role)) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Khusus Gudang / Pimpinan.'}};
     }
     const id = path.split('/')[5];
     const delivery = db.supplierDeliveries.find((d) => d.id === id);
@@ -1225,7 +2107,8 @@ async function handleStaticFallback(
       actorName: user.displayName,
       createdAt: now,
     });
-    if (body.recordExpense && delivery.unitCost > 0) {
+    if (delivery.paymentStatus !== 'TEMPO' && body.recordExpense && delivery.unitCost > 0) {
+      delivery.paymentStatus = 'LUNAS';
       db.ledger.unshift({
         id: randomId('ldg'),
         type: 'KELUAR',
@@ -1241,9 +2124,38 @@ async function handleStaticFallback(
     return {ok: true, status: 200, storageMode: 'browser', data: {delivery, product}};
   }
 
+  if (
+    path.startsWith('/api/ops/supplier/deliveries/') &&
+    path.endsWith('/pay') &&
+    method === 'PATCH'
+  ) {
+    if (!['PEMILIK', 'DIREKTUR', 'KEUANGAN'].includes(user.role)) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Khusus Keuangan / Pimpinan.'}};
+    }
+    const id = path.split('/')[5];
+    const delivery = db.supplierDeliveries.find((d) => d.id === id);
+    if (!delivery) return {ok: false, status: 404, storageMode: 'browser', data: {error: 'Tagihan tidak ditemukan.'}};
+    const totalBill = delivery.unitCost * delivery.quantity;
+    delivery.paymentStatus = 'LUNAS';
+    if (totalBill > 0) {
+      db.ledger.unshift({
+        id: randomId('ldg'),
+        type: 'KELUAR',
+        category: 'Bayar Hutang Pemasok',
+        description: `Pelunasan suplai ${delivery.supplierName}: ${delivery.productName} x${delivery.quantity}`,
+        amount: totalBill,
+        paymentMethod: String(body.paymentMethod || 'TRANSFER'),
+        actorName: user.displayName,
+        createdAt: new Date().toISOString(),
+      });
+    }
+    writeLocalDb(db);
+    return {ok: true, status: 200, storageMode: 'browser', data: {delivery}};
+  }
+
   if (path === '/api/ops/ledger' && method === 'POST') {
-    if (!['PEMILIK', 'KEUANGAN'].includes(user.role)) {
-      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Khusus Keuangan / Pemilik.'}};
+    if (!['PEMILIK', 'DIREKTUR', 'KEUANGAN'].includes(user.role)) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Khusus Keuangan / Pimpinan.'}};
     }
     const entry: LedgerEntry = {
       id: randomId('ldg'),
@@ -1258,6 +2170,31 @@ async function handleStaticFallback(
     db.ledger.unshift(entry);
     writeLocalDb(db);
     return {ok: true, status: 201, storageMode: 'browser', data: {entry}};
+  }
+
+  if (path === '/api/ops/kasbon' && method === 'POST') {
+    if (!['PEMILIK', 'DIREKTUR', 'KEUANGAN', 'KASIR'].includes(user.role)) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Akses ditolak.'}};
+    }
+    const customerName = String(body.customerName || '').trim();
+    const amountDue = Math.round(Number(body.amountDue || 0));
+    if (customerName.length < 2 || amountDue <= 0) {
+      return {ok: false, status: 400, storageMode: 'browser', data: {error: 'Nama dan nominal kasbon wajib valid.'}};
+    }
+    const record: KasbonRecord = {
+      id: randomId('ksb'),
+      customerName,
+      phone: String(body.phone || '').trim(),
+      address: String(body.address || '').trim() || 'Warga Gunung Batin Udik',
+      amountDue,
+      totalPaid: 0,
+      dueDate: String(body.dueDate || '').trim() || undefined,
+      note: String(body.note || '').trim() || 'Catatan bon / kasbon manual',
+      updatedAt: new Date().toISOString(),
+    };
+    db.kasbon.unshift(record);
+    writeLocalDb(db);
+    return {ok: true, status: 201, storageMode: 'browser', data: {kasbon: record}};
   }
 
   if (path.startsWith('/api/ops/kasbon/') && path.endsWith('/pay') && method === 'POST') {
@@ -1283,6 +2220,86 @@ async function handleStaticFallback(
     return {ok: true, status: 200, storageMode: 'browser', data: {kasbon: record}};
   }
 
+  if (path.startsWith('/api/ops/complaints/') && method === 'PATCH') {
+    if (!['PEMILIK', 'DIREKTUR', 'KASIR', 'GUDANG'].includes(user.role)) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Akses ditolak.'}};
+    }
+    const id = path.split('/')[4];
+    const complaint = db.complaints.find((c) => c.id === id);
+    if (!complaint) return {ok: false, status: 404, storageMode: 'browser', data: {error: 'Komplain tidak ditemukan.'}};
+    const nextStatus = body.status as ComplaintStatus;
+    if (!isLeadership && ['DISETUJUI', 'DITOLAK'].includes(nextStatus)) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Persetujuan akhir khusus Pemilik/Direktur.'}};
+    }
+    const prevStatus = complaint.status;
+    const now = new Date().toISOString();
+    complaint.status = nextStatus;
+    complaint.handledBy = user.displayName;
+    complaint.updatedAt = now;
+    if (typeof body.staffResponse === 'string') complaint.staffResponse = body.staffResponse.trim();
+    const refundAmount = Math.max(0, Math.round(Number(body.refundAmount || 0)));
+    if (refundAmount > 0) complaint.refundAmount = refundAmount;
+    const isFinalizing =
+      (nextStatus === 'DISETUJUI' || nextStatus === 'SELESAI') &&
+      prevStatus !== 'DISETUJUI' &&
+      prevStatus !== 'SELESAI' &&
+      (complaint.refundAmount || 0) > 0;
+    if (
+      isFinalizing &&
+      complaint.requestedResolution === 'REFUND_DANA' &&
+      !db.ledger.some((l) => l.description.includes(complaint.complaintNumber))
+    ) {
+      db.ledger.unshift({
+        id: randomId('ldg'),
+        type: 'KELUAR',
+        category: 'Refund / Retur Pelanggan',
+        description: `Refund ${complaint.complaintNumber} (${complaint.orderNumber})`,
+        amount: complaint.refundAmount!,
+        paymentMethod: 'TUNAI',
+        actorName: user.displayName,
+        createdAt: now,
+      });
+    }
+    if (
+      isFinalizing &&
+      complaint.requestedResolution === 'POTONG_TAGIHAN' &&
+      !db.ledger.some((l) => l.description.includes(complaint.complaintNumber))
+    ) {
+      const cmpPhone = normalizePhoneDigits(complaint.phone);
+      const openKasbon = db.kasbon.find((k) => {
+        const rem = Math.max(0, k.amountDue - k.totalPaid);
+        if (rem <= 0) return false;
+        const kp = normalizePhoneDigits(k.phone);
+        if (cmpPhone && kp) return kp === cmpPhone;
+        return k.customerName.trim().toLowerCase() === complaint.customerName.trim().toLowerCase();
+      });
+      let appliedCut = complaint.refundAmount!;
+      if (openKasbon) {
+        const rem = Math.max(0, openKasbon.amountDue - openKasbon.totalPaid);
+        appliedCut = Math.min(rem, complaint.refundAmount!);
+        if (appliedCut > 0) {
+          openKasbon.totalPaid += appliedCut;
+          openKasbon.updatedAt = now;
+          openKasbon.note = `${openKasbon.note} · [Potongan ${complaint.complaintNumber}: Rp ${appliedCut.toLocaleString('id-ID')}]`;
+        }
+      }
+      if (appliedCut > 0) {
+        db.ledger.unshift({
+          id: randomId('ldg'),
+          type: 'KELUAR',
+          category: 'Potongan / Retur Pelanggan',
+          description: `Potong tagihan ${complaint.complaintNumber} (${complaint.orderNumber})`,
+          amount: appliedCut,
+          paymentMethod: 'KASBON',
+          actorName: user.displayName,
+          createdAt: now,
+        });
+      }
+    }
+    writeLocalDb(db);
+    return {ok: true, status: 200, storageMode: 'browser', data: {complaint}};
+  }
+
   return {
     ok: false,
     status: 404,
@@ -1303,7 +2320,6 @@ export async function apiFetch<T = Record<string, any>>(
     const res = await fetch(url, options);
     const contentType = res.headers.get('content-type') || '';
 
-    // Static hosts (e.g. Cloudflare Workers static assets) return HTML/404 for /api/*
     if (!contentType.includes('application/json')) {
       detectedStaticMode = true;
       return handleStaticFallback(url, options);

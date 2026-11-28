@@ -1,6 +1,7 @@
 import {AlertTriangle, Check, X} from 'lucide-react';
 import {useCallback, useEffect, useState} from 'react';
 import {CartDrawer, CartItem} from './components/CartDrawer';
+import {CustomerAccountModal} from './components/CustomerAccountModal';
 import {Footer} from './components/Footer';
 import {Header} from './components/Header';
 import {HeroSection} from './components/HeroSection';
@@ -15,13 +16,44 @@ import {
 } from './lib/storeData';
 import {apiFetch} from './lib/apiClient';
 import type {
+  CustomerProfile,
+  Order,
   Product,
   ProductCategory,
   ProductVariant,
   StoreSettings,
 } from './types/store';
 
+const CART_STORAGE_KEY = 'tdj_cart_v1';
+const CUSTOMER_SESSION_KEY = 'tdj_customer_session_v1';
+
+function readInitialCart(): CartItem[] {
+  try {
+    const raw = window.localStorage.getItem(CART_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function readInitialCustomerSession(): {token: string | null; customer: CustomerProfile | null} {
+  try {
+    const raw = window.sessionStorage.getItem(CUSTOMER_SESSION_KEY);
+    if (!raw) return {token: null, customer: null};
+    const parsed = JSON.parse(raw) as {token?: string; customer?: CustomerProfile};
+    if (parsed.token && parsed.customer) {
+      return {token: parsed.token, customer: parsed.customer};
+    }
+  } catch {
+    // ignore
+  }
+  return {token: null, customer: null};
+}
+
 export default function App() {
+  const initialCustomer = readInitialCustomerSession();
   const [viewMode, setViewMode] = useState<'storefront' | 'portal'>('storefront');
   const [settings, setSettings] = useState<StoreSettings>(DEFAULT_STORE_SETTINGS);
   const [products, setProducts] = useState<Product[]>(INITIAL_PUBLIC_PRODUCTS);
@@ -30,11 +62,17 @@ export default function App() {
   const [selectedCategory, setSelectedCategory] = useState<ProductCategory>('Semua');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
-  const [cartItems, setCartItems] = useState<CartItem[]>([]);
+  const [cartItems, setCartItems] = useState<CartItem[]>(readInitialCart);
   const [isCartOpen, setIsCartOpen] = useState(false);
 
   const [isTrackerOpen, setIsTrackerOpen] = useState(false);
   const [trackerInitialCode, setTrackerInitialCode] = useState('');
+
+  // Customer session persisted in sessionStorage
+  const [customerToken, setCustomerToken] = useState<string | null>(initialCustomer.token);
+  const [customer, setCustomer] = useState<CustomerProfile | null>(initialCustomer.customer);
+  const [isAccountOpen, setIsAccountOpen] = useState(false);
+
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [mapsQuotaBanner, setMapsQuotaBanner] = useState(false);
 
@@ -56,6 +94,46 @@ export default function App() {
   useEffect(() => {
     fetchStoreCatalog();
   }, [fetchStoreCatalog]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(CART_STORAGE_KEY, JSON.stringify(cartItems));
+    } catch {
+      // ignore quota errors
+    }
+  }, [cartItems]);
+
+  useEffect(() => {
+    if (!customerToken) return;
+    let active = true;
+    apiFetch<{customer?: CustomerProfile}>('/api/customer/me', {
+      headers: {Authorization: `Bearer ${customerToken}`},
+    })
+      .then((res) => {
+        if (!active) return;
+        if (res.ok && res.data.customer) {
+          setCustomer(res.data.customer);
+          try {
+            window.sessionStorage.setItem(
+              CUSTOMER_SESSION_KEY,
+              JSON.stringify({token: customerToken, customer: res.data.customer})
+            );
+          } catch {
+            // ignore
+          }
+        } else if (res.status === 401) {
+          setCustomerToken(null);
+          setCustomer(null);
+          window.sessionStorage.removeItem(CUSTOMER_SESSION_KEY);
+        }
+      })
+      .catch(() => {
+        // ignore transient errors
+      });
+    return () => {
+      active = false;
+    };
+  }, [customerToken]);
 
   useEffect(() => {
     if (!toastMessage) return;
@@ -93,6 +171,23 @@ export default function App() {
     setToastMessage(`${product.name} (${variant.label}) ditambahkan ke keranjang`);
   };
 
+  const handleReorderItems = (orderItems: Order['items']) => {
+    let addedCount = 0;
+    for (const item of orderItems) {
+      const prod = products.find((p) => p.id === item.productId);
+      const variant = prod?.variants.find((v) => v.id === item.variantId);
+      if (prod && variant && variant.stock > 0) {
+        handleAddToCart(prod, variant, Math.min(variant.stock, item.quantity));
+        addedCount += 1;
+      }
+    }
+    if (addedCount > 0) {
+      setIsCartOpen(true);
+    } else {
+      setToastMessage('Stok produk dari pesanan sebelumnya sedang habis.');
+    }
+  };
+
   const handleUpdateQuantity = (key: string, delta: number) => {
     setCartItems((prev) =>
       prev
@@ -127,7 +222,7 @@ export default function App() {
               rel="noopener noreferrer"
               className="font-semibold underline underline-offset-2 text-amber-900"
             >
-              Panduan Kuota & Billing
+              Panduan Kuota &amp; Billing
             </a>
           </p>
         </div>
@@ -163,21 +258,25 @@ export default function App() {
       {quotaBanner}
       <Header
         cartCount={totalCartCount}
+        customer={customer}
         onOpenCart={() => setIsCartOpen(true)}
         onOpenTracker={() => {
           setTrackerInitialCode('');
           setIsTrackerOpen(true);
         }}
+        onOpenAccount={() => setIsAccountOpen(true)}
         onOpenPortal={() => setViewMode('portal')}
       />
 
       <main className="flex-1">
         <HeroSection
           settings={settings}
+          customer={customer}
           onOpenTracker={() => {
             setTrackerInitialCode('');
             setIsTrackerOpen(true);
           }}
+          onOpenAccount={() => setIsAccountOpen(true)}
           onOpenPortal={() => setViewMode('portal')}
         />
 
@@ -207,6 +306,7 @@ export default function App() {
           setTrackerInitialCode('');
           setIsTrackerOpen(true);
         }}
+        onOpenAccount={() => setIsAccountOpen(true)}
         onOpenPortal={() => setViewMode('portal')}
       />
 
@@ -221,6 +321,8 @@ export default function App() {
         onClose={() => setIsCartOpen(false)}
         items={cartItems}
         settings={settings}
+        customer={customer}
+        customerToken={customerToken}
         onUpdateQuantity={handleUpdateQuantity}
         onRemoveItem={handleRemoveItem}
         onOrderCreated={() => {
@@ -238,6 +340,40 @@ export default function App() {
         onClose={() => setIsTrackerOpen(false)}
         initialCode={trackerInitialCode}
         settings={settings}
+        customerToken={customerToken}
+      />
+
+      <CustomerAccountModal
+        isOpen={isAccountOpen}
+        onClose={() => setIsAccountOpen(false)}
+        customer={customer}
+        customerToken={customerToken}
+        onAuthenticated={(token, profile) => {
+          setCustomerToken(token);
+          setCustomer(profile);
+          try {
+            window.sessionStorage.setItem(
+              CUSTOMER_SESSION_KEY,
+              JSON.stringify({token, customer: profile})
+            );
+          } catch {
+            // ignore
+          }
+        }}
+        onLogout={() => {
+          setCustomerToken(null);
+          setCustomer(null);
+          try {
+            window.sessionStorage.removeItem(CUSTOMER_SESSION_KEY);
+          } catch {
+            // ignore
+          }
+        }}
+        onOpenOrderTracker={(code) => {
+          setTrackerInitialCode(code);
+          setIsTrackerOpen(true);
+        }}
+        onReorderItems={handleReorderItems}
       />
 
       {toastMessage && (

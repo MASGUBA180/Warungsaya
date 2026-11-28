@@ -1,9 +1,16 @@
 import {ArrowLeft, Eye, EyeOff, LogOut, RefreshCw} from 'lucide-react';
 import {FormEvent, useCallback, useEffect, useState} from 'react';
 import {apiFetch} from '../../lib/apiClient';
-import {ROLE_LABELS, ROLE_SCOPE_DESCRIPTIONS} from '../../lib/storeData';
+import {
+  ROLE_HIERARCHY_LEVEL,
+  ROLE_LABELS,
+  ROLE_SCOPE_DESCRIPTIONS,
+} from '../../lib/storeData';
 import type {
+  AuditLogEntry,
   AuthUser,
+  CashierShift,
+  ComplaintRecord,
   DivisionRole,
   KasbonRecord,
   LedgerEntry,
@@ -15,6 +22,7 @@ import type {
   SupplierDelivery,
 } from '../../types/store';
 import {CashierPosTab} from './CashierPosTab';
+import {ComplaintsTab} from './ComplaintsTab';
 import {CourierTab} from './CourierTab';
 import {FinanceTab} from './FinanceTab';
 import {OverviewMetrics, OwnerOverviewTab} from './OwnerOverviewTab';
@@ -28,6 +36,7 @@ type OpsTab =
   | 'pemasok'
   | 'kurir'
   | 'keuangan'
+  | 'komplain'
   | 'admin';
 
 interface StaffPortalProps {
@@ -40,16 +49,32 @@ const TAB_CONFIG: {
   label: string;
   roles: DivisionRole[];
 }[] = [
-  {id: 'overview', label: 'Ringkasan Pemilik', roles: ['PEMILIK']},
-  {id: 'kasir', label: 'Kasir & POS', roles: ['PEMILIK', 'KASIR']},
-  {id: 'gudang', label: 'Gudang & Stok', roles: ['PEMILIK', 'GUDANG']},
-  {id: 'pemasok', label: 'Pemasok & Suplai', roles: ['PEMILIK', 'GUDANG', 'PEMASOK']},
-  {id: 'kurir', label: 'Kurir & Peta Antar', roles: ['PEMILIK', 'KURIR']},
-  {id: 'keuangan', label: 'Keuangan & Kasbon', roles: ['PEMILIK', 'KEUANGAN', 'KASIR']},
-  {id: 'admin', label: 'Staf & Pengaturan', roles: ['PEMILIK']},
+  {id: 'overview', label: 'Ringkasan Pemilik', roles: ['PEMILIK', 'DIREKTUR']},
+  {id: 'kasir', label: 'Kasir & POS', roles: ['PEMILIK', 'DIREKTUR', 'KASIR']},
+  {id: 'gudang', label: 'Gudang & Stok', roles: ['PEMILIK', 'DIREKTUR', 'GUDANG']},
+  {
+    id: 'pemasok',
+    label: 'Pemasok & Suplai',
+    roles: ['PEMILIK', 'DIREKTUR', 'GUDANG', 'PEMASOK'],
+  },
+  {id: 'kurir', label: 'Kurir & Peta Antar', roles: ['PEMILIK', 'DIREKTUR', 'KURIR']},
+  {
+    id: 'keuangan',
+    label: 'Keuangan & Kasbon',
+    roles: ['PEMILIK', 'DIREKTUR', 'KEUANGAN', 'KASIR'],
+  },
+  {
+    id: 'komplain',
+    label: 'Komplain & Retur',
+    roles: ['PEMILIK', 'DIREKTUR', 'KASIR', 'GUDANG'],
+  },
+  {id: 'admin', label: 'Staf & Pengaturan', roles: ['PEMILIK', 'DIREKTUR']},
 ];
 
 function getTabLabelForRole(tab: {id: OpsTab; label: string}, role: DivisionRole): string {
+  if (tab.id === 'overview' && role === 'DIREKTUR') {
+    return 'Ringkasan Direktur';
+  }
   if (tab.id === 'pemasok') {
     if (role === 'PEMASOK') return 'Suplai Pemasok';
     if (role === 'GUDANG') return 'Terima Pemasok';
@@ -61,12 +86,20 @@ function getTabLabelForRole(tab: {id: OpsTab; label: string}, role: DivisionRole
   return tab.label;
 }
 
+const STAFF_TOKEN_KEY = 'tdj_staff_token_v1';
+
 export function StaffPortal({
   onBackToStorefront,
   onStoreDataChanged,
 }: StaffPortalProps) {
-  // In-memory auth session token (never persisted to localStorage)
-  const [authToken, setAuthToken] = useState<string | null>(null);
+  // Staff session token stored in sessionStorage (tab-scoped)
+  const [authToken, setAuthToken] = useState<string | null>(() => {
+    try {
+      return window.sessionStorage.getItem(STAFF_TOKEN_KEY);
+    } catch {
+      return null;
+    }
+  });
   const [user, setUser] = useState<AuthUser | null>(null);
   const [authStatus, setAuthStatus] = useState<{
     ownerClaimed: boolean;
@@ -97,7 +130,11 @@ export function StaffPortal({
   const [supplierDeliveries, setSupplierDeliveries] = useState<SupplierDelivery[]>([]);
   const [ledger, setLedger] = useState<LedgerEntry[]>([]);
   const [kasbon, setKasbon] = useState<KasbonRecord[]>([]);
+  const [complaints, setComplaints] = useState<ComplaintRecord[]>([]);
+  const [shifts, setShifts] = useState<CashierShift[]>([]);
+  const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
   const [staff, setStaff] = useState<PublicStaffProfile[]>([]);
+  const [couriers, setCouriers] = useState<PublicStaffProfile[]>([]);
   const [settings, setSettings] = useState<StoreSettings | null>(null);
 
   useEffect(() => {
@@ -130,13 +167,22 @@ export function StaffPortal({
           supplierDeliveries?: SupplierDelivery[];
           ledger?: LedgerEntry[];
           kasbon?: KasbonRecord[];
+          complaints?: ComplaintRecord[];
+          shifts?: CashierShift[];
+          auditLogs?: AuditLogEntry[];
           staff?: PublicStaffProfile[];
+          couriers?: PublicStaffProfile[];
           settings?: StoreSettings | null;
         }>('/api/ops/bootstrap', {
           headers: {Authorization: `Bearer ${token}`},
         });
         if (!res.ok) {
           if (res.status === 401) {
+            try {
+              window.sessionStorage.removeItem(STAFF_TOKEN_KEY);
+            } catch {
+              // ignore storage errors
+            }
             setAuthToken(null);
             setUser(null);
           }
@@ -144,6 +190,10 @@ export function StaffPortal({
         }
         const data = res.data;
         setUser(data.user);
+        setActiveTab((prev) => {
+          const allowed = TAB_CONFIG.filter((t) => t.roles.includes(data.user.role));
+          return allowed.some((t) => t.id === prev) ? prev : allowed[0]?.id || 'kasir';
+        });
         setOverview(data.overview);
         setProducts(data.products || []);
         setOrders(data.orders || []);
@@ -151,7 +201,11 @@ export function StaffPortal({
         setSupplierDeliveries(data.supplierDeliveries || []);
         setLedger(data.ledger || []);
         setKasbon(data.kasbon || []);
+        setComplaints(data.complaints || []);
+        setShifts(data.shifts || []);
+        setAuditLogs(data.auditLogs || []);
         setStaff(data.staff || []);
+        setCouriers(data.couriers || []);
         setSettings(data.settings || null);
         onStoreDataChanged();
       } finally {
@@ -160,6 +214,12 @@ export function StaffPortal({
     },
     [onStoreDataChanged]
   );
+
+  useEffect(() => {
+    if (authToken && !user) {
+      loadOperationalData(authToken);
+    }
+  }, [authToken, user, loadOperationalData]);
 
   const pickDefaultTabForRole = (role: DivisionRole): OpsTab => {
     const firstAllowed = TAB_CONFIG.find((t) => t.roles.includes(role));
@@ -192,6 +252,11 @@ export function StaffPortal({
         setAuthError(res.data.error || 'Gagal membuat akun pemilik.');
         return;
       }
+      try {
+        window.sessionStorage.setItem(STAFF_TOKEN_KEY, res.data.token);
+      } catch {
+        // ignore storage errors
+      }
       setAuthToken(res.data.token);
       setUser(res.data.user);
       setActiveTab(pickDefaultTabForRole(res.data.user.role));
@@ -223,6 +288,11 @@ export function StaffPortal({
         setAuthError(res.data.error || 'ID/username atau kata sandi salah.');
         return;
       }
+      try {
+        window.sessionStorage.setItem(STAFF_TOKEN_KEY, res.data.token);
+      } catch {
+        // ignore storage errors
+      }
       setAuthToken(res.data.token);
       setUser(res.data.user);
       setLoginPasscode('');
@@ -236,6 +306,11 @@ export function StaffPortal({
   };
 
   const handleLogout = () => {
+    try {
+      window.sessionStorage.removeItem(STAFF_TOKEN_KEY);
+    } catch {
+      // ignore storage errors
+    }
     setAuthToken(null);
     setUser(null);
     setOverview(null);
@@ -264,12 +339,12 @@ export function StaffPortal({
                 Toko Dimas Jaya · Gang Makam, Gunung Batin Udik
               </p>
               <h1 className="font-display text-2xl font-bold text-zinc-900 mt-1">
-                Portal Pemilik & Divisi Toko
+                Portal Pemilik, Direktur &amp; Divisi Toko
               </h1>
               <p className="text-sm text-zinc-600 mt-1.5 leading-relaxed">
                 {canClaimOwner && authTab === 'claim'
-                  ? 'Buat ID dan kata sandi Pemilik Anda sekarang untuk masuk dan mengatur seluruh divisi toko.'
-                  : 'Masuk menggunakan ID/username dan kata sandi akun Pemilik atau staf divisi.'}
+                  ? 'Buat ID dan kata sandi Pemilik Anda sekarang untuk masuk dan mengatur Direktur serta seluruh divisi toko.'
+                  : 'Masuk menggunakan ID/username dan kata sandi akun Pemilik, Direktur, atau staf divisi.'}
               </p>
             </div>
 
@@ -295,7 +370,7 @@ export function StaffPortal({
                           : 'text-zinc-600 hover:text-zinc-900'
                       }`}
                     >
-                      Buat ID & Sandi Pemilik
+                      Buat ID &amp; Sandi Pemilik
                     </button>
                     <button
                       type="button"
@@ -394,7 +469,7 @@ export function StaffPortal({
                   <form onSubmit={handleLogin} className="space-y-4">
                     <div>
                       <label htmlFor="login-user" className="block text-xs text-zinc-600 mb-1">
-                        ID / Username Pemilik atau Staf
+                        ID / Username Pemilik, Direktur, atau Staf
                       </label>
                       <input
                         id="login-user"
@@ -448,8 +523,8 @@ export function StaffPortal({
 
                     {!canClaimOwner && (
                       <p className="text-xs text-zinc-500 leading-relaxed pt-1">
-                        Lupa ID atau sandi staf? Minta Pemilik mereset lewat menu{' '}
-                        <span className="font-medium text-zinc-700">Staf & Pengaturan</span>.
+                        Lupa ID atau sandi staf? Minta Pemilik atau Direktur mereset lewat menu{' '}
+                        <span className="font-medium text-zinc-700">Staf &amp; Pengaturan</span>.
                         Pemilik juga dapat login darurat memakai username{' '}
                         <span className="font-mono text-zinc-700">pemilik</span> dengan variabel{' '}
                         <span className="font-mono text-zinc-700">OWNER_PASSCODE</span> di panel
@@ -468,11 +543,14 @@ export function StaffPortal({
 
   const allowedTabs = TAB_CONFIG.filter((t) => t.roles.includes(user.role));
   const currentTabConfig = allowedTabs.find((t) => t.id === activeTab) ?? allowedTabs[0];
+  const openComplaintsBadge = complaints.filter(
+    (c) => c.status === 'BARU' || c.status === 'DIPROSES'
+  ).length;
 
   return (
     <div className="min-h-screen bg-[#FAFAFA] flex flex-col lg:flex-row">
       {/* Sidebar navigation (240px desktop) */}
-      <aside className="lg:w-60 bg-white border-b lg:border-b-0 lg:border-r border-zinc-200 flex flex-col justify-between shrink-0">
+      <aside className="lg:w-60 bg-white border-b lg:border-b-0 lg:border-r border-zinc-200 flex flex-col justify-between shrink-0 print:hidden">
         <div>
           <div className="px-5 py-4 border-b border-zinc-200">
             <p className="font-display text-base font-bold text-zinc-900">Toko Dimas Jaya</p>
@@ -490,13 +568,22 @@ export function StaffPortal({
                   key={tab.id}
                   type="button"
                   onClick={() => setActiveTab(tab.id)}
-                  className={`px-3.5 py-2.5 min-h-[40px] rounded-lg text-left text-sm font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  className={`px-3.5 py-2.5 min-h-[40px] rounded-lg text-left text-sm font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer flex items-center justify-between gap-2 ${
                     isActive
                       ? 'bg-[#14532D] text-white'
                       : 'text-zinc-700 hover:bg-zinc-100 hover:text-zinc-900'
                   }`}
                 >
-                  {getTabLabelForRole(tab, user.role)}
+                  <span>{getTabLabelForRole(tab, user.role)}</span>
+                  {tab.id === 'komplain' && openComplaintsBadge > 0 && (
+                    <span
+                      className={`text-[11px] font-mono font-bold px-1.5 py-0.5 rounded tabular-price ${
+                        isActive ? 'bg-white text-[#14532D]' : 'bg-amber-100 text-amber-800'
+                      }`}
+                    >
+                      {openComplaintsBadge}
+                    </span>
+                  )}
                 </button>
               );
             })}
@@ -506,7 +593,8 @@ export function StaffPortal({
         <div className="hidden lg:block p-4 border-t border-zinc-200 space-y-3">
           <div className="text-xs">
             <p className="font-semibold text-zinc-900 truncate">{user.displayName}</p>
-            <p className="text-zinc-500 mt-0.5">{ROLE_LABELS[user.role]}</p>
+            <p className="text-zinc-700 mt-0.5">{ROLE_LABELS[user.role]}</p>
+            <p className="text-[11px] text-zinc-500 mt-0.5">{ROLE_HIERARCHY_LEVEL[user.role]}</p>
           </div>
           <button
             type="button"
@@ -521,7 +609,7 @@ export function StaffPortal({
 
       {/* Main Workspace */}
       <div className="flex-1 min-w-0 flex flex-col">
-        <header className="bg-white border-b border-zinc-200 px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
+        <header className="bg-white border-b border-zinc-200 px-4 sm:px-6 h-16 flex items-center justify-between gap-4 print:hidden">
           <div className="min-w-0">
             <p className="text-sm font-semibold text-zinc-900 truncate">
               Portal Staf <span className="text-zinc-400 mx-1">/</span>{' '}
@@ -578,10 +666,10 @@ export function StaffPortal({
             </div>
           ) : (
             <div className="space-y-6">
-              <div className="bg-white border border-zinc-200 rounded-xl px-5 py-3.5 flex flex-wrap items-center justify-between gap-2">
+              <div className="bg-white border border-zinc-200 rounded-xl px-5 py-3.5 flex flex-wrap items-center justify-between gap-2 print:hidden">
                 <div>
                   <p className="text-xs font-semibold text-[#14532D]">
-                    Hak Akses: {ROLE_LABELS[user.role]}
+                    Hak Akses: {ROLE_LABELS[user.role]} · {ROLE_HIERARCHY_LEVEL[user.role]}
                   </p>
                   <p className="text-xs text-zinc-600 mt-0.5">
                     {ROLE_SCOPE_DESCRIPTIONS[user.role]}
@@ -592,10 +680,14 @@ export function StaffPortal({
               {(currentTabConfig?.id === 'overview' || currentTabConfig?.id === 'admin') && (
                 <OwnerOverviewTab
                   mode={currentTabConfig.id === 'admin' ? 'admin' : 'overview'}
+                  currentUserRole={user.role}
                   overview={overview}
                   orders={orders}
+                  ledger={ledger}
                   products={products}
                   staff={staff}
+                  shifts={shifts}
+                  auditLogs={auditLogs}
                   settings={settings}
                   authToken={authToken}
                   onRefresh={() => loadOperationalData(authToken)}
@@ -608,6 +700,8 @@ export function StaffPortal({
                   role={user.role}
                   products={products}
                   orders={orders}
+                  shifts={shifts}
+                  couriers={couriers}
                   authToken={authToken}
                   onRefresh={() => loadOperationalData(authToken)}
                 />
@@ -639,6 +733,8 @@ export function StaffPortal({
 
               {currentTabConfig?.id === 'kurir' && (
                 <CourierTab
+                  currentUser={user}
+                  couriers={couriers}
                   orders={orders}
                   settings={settings}
                   authToken={authToken}
@@ -651,6 +747,17 @@ export function StaffPortal({
                   role={user.role}
                   ledger={ledger}
                   kasbon={kasbon}
+                  supplierDeliveries={supplierDeliveries}
+                  authToken={authToken}
+                  onRefresh={() => loadOperationalData(authToken)}
+                />
+              )}
+
+              {currentTabConfig?.id === 'komplain' && (
+                <ComplaintsTab
+                  role={user.role}
+                  complaints={complaints}
+                  products={products}
                   authToken={authToken}
                   onRefresh={() => loadOperationalData(authToken)}
                 />

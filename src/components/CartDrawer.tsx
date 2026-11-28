@@ -1,8 +1,18 @@
-import {Check, Copy, MapPin, Minus, Plus, ShoppingBag, Trash2, X} from 'lucide-react';
+import {Check, Copy, MapPin, Minus, Plus, QrCode, ShoppingBag, Trash2, X} from 'lucide-react';
 import {FormEvent, useEffect, useState} from 'react';
 import {apiFetch} from '../lib/apiClient';
 import {formatRupiah} from '../lib/storeData';
-import type {GeoPoint, Product, ProductVariant, StoreSettings} from '../types/store';
+import type {
+  CustomerProfile,
+  GeoPoint,
+  PaymentMethod,
+  PaymentStatus,
+  Product,
+  ProductVariant,
+  QrisPaymentInfo,
+  StoreSettings,
+} from '../types/store';
+import {QrisCard} from './QrisCard';
 
 export interface CartItem {
   key: string;
@@ -15,6 +25,9 @@ interface OrderReceipt {
   orderNumber: string;
   customerName: string;
   deliveryMethod: 'cod' | 'pickup';
+  paymentMethod?: PaymentMethod;
+  paymentStatus?: PaymentStatus;
+  qris?: QrisPaymentInfo;
   addressNote: string;
   notes: string;
   items: {
@@ -33,6 +46,8 @@ interface CartDrawerProps {
   onClose: () => void;
   items: CartItem[];
   settings: StoreSettings;
+  customer?: CustomerProfile | null;
+  customerToken?: string | null;
   onUpdateQuantity: (key: string, delta: number) => void;
   onRemoveItem: (key: string) => void;
   onOrderCreated: (orderNumber: string) => void;
@@ -44,22 +59,38 @@ export function CartDrawer({
   onClose,
   items,
   settings,
+  customer,
+  customerToken,
   onUpdateQuantity,
   onRemoveItem,
   onOrderCreated,
   onOpenTracker,
 }: CartDrawerProps) {
-  const [customerName, setCustomerName] = useState('');
-  const [phone, setPhone] = useState('');
+  const [customerName, setCustomerName] = useState(customer?.name || '');
+  const [phone, setPhone] = useState(customer?.phone || '');
   const [deliveryMethod, setDeliveryMethod] = useState<'cod' | 'pickup'>('cod');
-  const [addressNote, setAddressNote] = useState('Gang Makam, Gunung Batin Udik');
+  const [paymentChoice, setPaymentChoice] = useState<'PAY_ON_DELIVERY' | 'QRIS'>('PAY_ON_DELIVERY');
+  const [addressNote, setAddressNote] = useState(
+    customer?.defaultAddress || 'Gang Makam, Gunung Batin Udik'
+  );
   const [notes, setNotes] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [confirmingQris, setConfirmingQris] = useState(false);
   const [formError, setFormError] = useState('');
   const [receipt, setReceipt] = useState<OrderReceipt | null>(null);
   const [copiedReceipt, setCopiedReceipt] = useState(false);
   const [customerCoords, setCustomerCoords] = useState<GeoPoint | null>(null);
   const [gpsStatus, setGpsStatus] = useState('');
+
+  useEffect(() => {
+    if (customer) {
+      setCustomerName((prev) => prev || customer.name);
+      setPhone((prev) => prev || customer.phone);
+      setAddressNote((prev) =>
+        prev === 'Gang Makam, Gunung Batin Udik' || !prev ? customer.defaultAddress : prev
+      );
+    }
+  }, [customer]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -91,15 +122,24 @@ export function CartDrawer({
     setFormError('');
     setSubmitting(true);
     try {
+      const headers: Record<string, string> = {'Content-Type': 'application/json'};
+      if (customerToken) headers.Authorization = `Bearer ${customerToken}`;
+
       const res = await apiFetch<{order?: OrderReceipt; error?: string}>(
         '/api/public/orders',
         {
           method: 'POST',
-          headers: {'Content-Type': 'application/json'},
+          headers,
           body: JSON.stringify({
             customerName: customerName.trim(),
             phone: phone.trim(),
             deliveryMethod,
+            paymentMethod:
+              paymentChoice === 'QRIS'
+                ? 'QRIS'
+                : deliveryMethod === 'cod'
+                  ? 'COD'
+                  : 'TUNAI',
             addressNote: addressNote.trim(),
             notes: notes.trim(),
             customerCoords: deliveryMethod === 'cod' ? customerCoords : null,
@@ -125,12 +165,37 @@ export function CartDrawer({
     }
   };
 
+  const handleConfirmQrisPayment = async () => {
+    if (!receipt) return;
+    setConfirmingQris(true);
+    try {
+      const headers: Record<string, string> = {'Content-Type': 'application/json'};
+      if (customerToken) headers.Authorization = `Bearer ${customerToken}`;
+      const res = await apiFetch<{order?: OrderReceipt; error?: string}>(
+        `/api/public/orders/${receipt.orderNumber}/qris-pay`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            phoneLast4: phone.replace(/\D/g, '').slice(-4),
+          }),
+        }
+      );
+      if (res.ok && res.data.order) {
+        setReceipt(res.data.order);
+      }
+    } finally {
+      setConfirmingQris(false);
+    }
+  };
+
   const handleCopyReceipt = async () => {
     if (!receipt) return;
     const lines = [
       `Pesanan ${receipt.orderNumber} — ${settings.name}`,
       `Pemesan: ${receipt.customerName}`,
       `Metode: ${receipt.deliveryMethod === 'cod' ? 'Antar COD' : 'Ambil di Toko'}`,
+      `Pembayaran: ${receipt.paymentMethod === 'QRIS' ? `QRIS (${receipt.paymentStatus})` : 'COD / Tunai'}`,
       `Alamat: ${receipt.addressNote}`,
       '',
       ...receipt.items.map(
@@ -176,8 +241,10 @@ export function CartDrawer({
 
   const handleNewOrder = () => {
     setReceipt(null);
-    setCustomerName('');
-    setPhone('');
+    if (!customer) {
+      setCustomerName('');
+      setPhone('');
+    }
     setNotes('');
     setCustomerCoords(null);
     setGpsStatus('');
@@ -216,7 +283,7 @@ export function CartDrawer({
         </div>
 
         {receipt ? (
-          <div className="flex-1 overflow-y-auto p-6 space-y-6">
+          <div className="flex-1 overflow-y-auto p-6 space-y-5">
             <div className="p-5 rounded-xl bg-[#F3F4F2] border border-zinc-200 space-y-2">
               <p className="text-xs font-mono font-medium text-[#14532D] tabular-price">
                 Kode Pesanan: {receipt.orderNumber}
@@ -225,13 +292,24 @@ export function CartDrawer({
                 Terima kasih, {receipt.customerName}
               </h3>
               <p className="text-sm text-zinc-600 leading-relaxed">
-                Pesanan Anda telah masuk ke sistem kasir & gudang Toko Dimas Jaya. Simpan kode{' '}
-                <span className="font-mono font-semibold text-zinc-900">
-                  {receipt.orderNumber}
-                </span>{' '}
-                untuk melacak status pengantaran.
+                {receipt.paymentMethod === 'QRIS' && receipt.paymentStatus !== 'LUNAS'
+                  ? 'Scan kode QRIS dinamis di bawah ini agar kasir & kurir langsung memproses pesanan Anda.'
+                  : 'Pesanan Anda telah masuk ke sistem kasir & gudang Toko Dimas Jaya.'}
               </p>
             </div>
+
+            {receipt.qris && (
+              <QrisCard
+                qris={receipt.qris}
+                orderNumber={receipt.orderNumber}
+                onConfirmPayment={
+                  receipt.qris.gatewayStatus === 'PENDING'
+                    ? handleConfirmQrisPayment
+                    : undefined
+                }
+                confirming={confirmingQris}
+              />
+            )}
 
             <div className="space-y-3">
               <p className="text-xs font-semibold text-zinc-500">Rincian Belanja</p>
@@ -259,7 +337,15 @@ export function CartDrawer({
                   </span>
                 </div>
                 <div className="p-3.5 bg-zinc-50 flex items-center justify-between text-sm font-bold text-zinc-900">
-                  <span>Total Bayar (Tunai / COD)</span>
+                  <span>
+                    Total Bayar (
+                    {receipt.paymentMethod === 'QRIS'
+                      ? receipt.paymentStatus === 'LUNAS'
+                        ? 'QRIS Lunas'
+                        : 'QRIS Dinamis'
+                      : 'Tunai / COD'}
+                    )
+                  </span>
                   <span className="tabular-price">{formatRupiah(receipt.total)}</span>
                 </div>
               </div>
@@ -275,7 +361,7 @@ export function CartDrawer({
                 }}
                 className="w-full py-2.5 px-4 min-h-[42px] rounded-lg border border-zinc-300 bg-white text-zinc-900 text-sm font-semibold hover:bg-zinc-50 transition-colors cursor-pointer"
               >
-                Lacak Status Pesanan Ini
+                Lacak Status &amp; Peta Kurir
               </button>
 
               <button
@@ -301,7 +387,7 @@ export function CartDrawer({
                 onClick={handleNewOrder}
                 className="w-full py-3 px-4 min-h-[44px] rounded-lg bg-[#14532D] text-white text-sm font-semibold hover:bg-[#166534] transition-colors cursor-pointer"
               >
-                Selesai & Kembali Belanja
+                Selesai &amp; Kembali Belanja
               </button>
             </div>
           </div>
@@ -324,7 +410,7 @@ export function CartDrawer({
           </div>
         ) : (
           <form onSubmit={handleSubmitOrder} className="flex-1 flex flex-col min-h-0">
-            <div className="flex-1 overflow-y-auto p-6 space-y-6">
+            <div className="flex-1 overflow-y-auto p-6 space-y-5">
               <div className="divide-y divide-zinc-200 border border-zinc-200 rounded-xl bg-white">
                 {items.map((item) => (
                   <div key={item.key} className="p-4 flex items-start justify-between gap-3">
@@ -385,7 +471,7 @@ export function CartDrawer({
                         : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50'
                     }`}
                   >
-                    Antar COD Lokal
+                    Antar Kurir Lokal
                   </button>
                   <button
                     type="button"
@@ -410,8 +496,39 @@ export function CartDrawer({
                 )}
               </div>
 
+              <div className="space-y-2">
+                <p className="text-xs font-semibold text-zinc-700">Cara Pembayaran</p>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setPaymentChoice('PAY_ON_DELIVERY')}
+                    className={`py-2.5 px-3 min-h-[40px] rounded-lg text-xs font-semibold border transition-colors cursor-pointer ${
+                      paymentChoice === 'PAY_ON_DELIVERY'
+                        ? 'bg-zinc-900 text-white border-zinc-900'
+                        : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50'
+                    }`}
+                  >
+                    {deliveryMethod === 'cod' ? 'Bayar COD (Tunai)' : 'Tunai di Toko'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPaymentChoice('QRIS')}
+                    className={`inline-flex items-center justify-center gap-1.5 py-2.5 px-3 min-h-[40px] rounded-lg text-xs font-semibold border transition-colors cursor-pointer ${
+                      paymentChoice === 'QRIS'
+                        ? 'bg-zinc-900 text-white border-zinc-900'
+                        : 'bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50'
+                    }`}
+                  >
+                    <QrCode className="w-3.5 h-3.5" aria-hidden="true" />
+                    <span>QRIS Dinamis</span>
+                  </button>
+                </div>
+              </div>
+
               <div className="space-y-3">
-                <p className="text-xs font-semibold text-zinc-700">Data Pemesan</p>
+                <p className="text-xs font-semibold text-zinc-700">
+                  Data Pemesan {customer ? '(Terisi dari Akun Anda)' : ''}
+                </p>
 
                 <div>
                   <label htmlFor="order-name" className="block text-xs text-zinc-600 mb-1">
@@ -465,7 +582,9 @@ export function CartDrawer({
                       >
                         <MapPin className="w-3.5 h-3.5 text-[#14532D]" aria-hidden="true" />
                         <span>
-                          {customerCoords ? 'Perbarui Pin Lokasi Saya' : 'Tandai Titik GPS Saya (Opsional)'}
+                          {customerCoords
+                            ? 'Perbarui Pin Lokasi Saya'
+                            : 'Tandai Titik GPS Saya (Opsional)'}
                         </span>
                       </button>
                       {customerCoords && (
@@ -536,7 +655,9 @@ export function CartDrawer({
               >
                 {submitting
                   ? 'Mengirim Pesanan...'
-                  : `Buat Pesanan (${deliveryMethod === 'cod' ? 'Bayar COD' : 'Ambil di Toko'})`}
+                  : paymentChoice === 'QRIS'
+                    ? 'Buat Pesanan & Tampilkan QRIS'
+                    : `Buat Pesanan (${deliveryMethod === 'cod' ? 'Bayar COD' : 'Ambil di Toko'})`}
               </button>
             </div>
           </form>

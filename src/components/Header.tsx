@@ -1,21 +1,26 @@
 import {ShoppingBag} from 'lucide-react';
+import type {CustomerProfile} from '../types/store';
 
 interface HeaderProps {
   cartCount: number;
+  customer: CustomerProfile | null;
   onOpenCart: () => void;
   onOpenTracker: () => void;
+  onOpenAccount: () => void;
   onOpenPortal: () => void;
 }
 
 export function Header({
   cartCount,
+  customer,
   onOpenCart,
   onOpenTracker,
+  onOpenAccount,
   onOpenPortal,
 }: HeaderProps) {
   return (
     <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-sm border-b border-zinc-200">
-      <div className="max-w-6xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-8">
+      <div className="max-w-6xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-6">
         {/* Zone 1: Single-element brand wordmark */}
         <a
           href="#beranda"
@@ -24,10 +29,10 @@ export function Header({
           Toko Dimas Jaya
         </a>
 
-        {/* Zone 2: 4 concise single-line nav links */}
+        {/* Zone 2: Concise single-line nav links (5 links max) */}
         <nav
           aria-label="Navigasi utama"
-          className="hidden md:flex items-center gap-7 text-sm font-medium text-zinc-600"
+          className="hidden md:flex items-center gap-6 text-sm font-medium text-zinc-600"
         >
           <a
             href="#katalog"
@@ -41,6 +46,13 @@ export function Header({
             className="hover:text-zinc-900 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             Lacak Pesanan
+          </button>
+          <button
+            type="button"
+            onClick={onOpenAccount}
+            className="hover:text-zinc-900 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer text-[#14532D] font-semibold"
+          >
+            {customer ? `Akun: ${customer.name.split(' ')[0]}` : 'Akun Saya'}
           </button>
           <a
             href="#lokasi"

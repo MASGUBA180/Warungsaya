@@ -1,17 +1,21 @@
 import {ArrowRight, MapPin} from 'lucide-react';
 import {STORE_HIGHLIGHTS} from '../lib/storeData';
-import type {StoreSettings} from '../types/store';
+import type {CustomerProfile, StoreSettings} from '../types/store';
 import {ResilientImage} from './ResilientImage';
 
 interface HeroSectionProps {
   settings: StoreSettings;
+  customer: CustomerProfile | null;
   onOpenTracker: () => void;
+  onOpenAccount: () => void;
   onOpenPortal: () => void;
 }
 
 export function HeroSection({
   settings,
+  customer,
   onOpenTracker,
+  onOpenAccount,
   onOpenPortal,
 }: HeroSectionProps) {
   return (
@@ -29,7 +33,7 @@ export function HeroSection({
               </p>
 
               <h1 className="font-display text-3xl sm:text-4xl lg:text-[2.75rem] font-bold tracking-tight text-zinc-900 leading-[1.12] [text-wrap:balance] max-w-xl">
-                Belanja Sembako & Kebutuhan Harian Dekat Rumah
+                Belanja Sembako &amp; Kebutuhan Harian Dekat Rumah
               </h1>
 
               <p className="mt-5 text-base text-zinc-600 leading-relaxed max-w-xl">
@@ -54,11 +58,19 @@ export function HeroSection({
                   className="inline-flex items-center gap-2 px-4 py-3 min-h-[44px] rounded-lg border border-zinc-300 bg-white text-zinc-800 text-sm font-medium hover:bg-zinc-50 transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-zinc-400"
                 >
                   <MapPin className="w-4 h-4 text-[#14532D] shrink-0" aria-hidden="true" />
-                  <span>Lokasi & Jam Buka</span>
+                  <span>Lokasi &amp; Jam Buka</span>
                 </a>
               </div>
 
               <div className="md:hidden flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-medium text-zinc-600 pt-1">
+                <button
+                  type="button"
+                  onClick={onOpenAccount}
+                  className="text-[#14532D] font-semibold underline underline-offset-4 cursor-pointer"
+                >
+                  {customer ? `Akun: ${customer.name}` : 'Akun Saya & Riwayat'}
+                </button>
+                <span aria-hidden="true">·</span>
                 <button
                   type="button"
                   onClick={onOpenTracker}
@@ -70,9 +82,9 @@ export function HeroSection({
                 <button
                   type="button"
                   onClick={onOpenPortal}
-                  className="text-[#14532D] font-semibold underline underline-offset-4 cursor-pointer"
+                  className="hover:text-zinc-900 underline underline-offset-4 cursor-pointer"
                 >
-                  Portal Pemilik & Staf
+                  Portal Staf
                 </button>
               </div>
             </div>
