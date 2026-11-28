@@ -29,6 +29,7 @@ import type {
   ComplaintRecord,
   ComplaintResolution,
   CustomerProfile,
+  GeoPoint,
   KasbonRecord,
   Order,
 } from '../types/store';
@@ -70,6 +71,9 @@ export function CustomerAccountModal({
   const [kasbonList, setKasbonList] = useState<KasbonRecord[]>([]);
   const [loadingData, setLoadingData] = useState(false);
 
+  // Order status filter
+  const [orderFilter, setOrderFilter] = useState<'ALL' | 'ACTIVE' | 'DONE' | 'CANCELLED'>('ALL');
+
   // Order cancellation inline state
   const [confirmCancelOrderNo, setConfirmCancelOrderNo] = useState<string | null>(null);
   const [cancellingOrderNo, setCancellingOrderNo] = useState<string | null>(null);
@@ -89,6 +93,10 @@ export function CustomerAccountModal({
   // Profile & password edit state
   const [editName, setEditName] = useState('');
   const [editAddr, setEditAddr] = useState('');
+  const [editSavedCoords, setEditSavedCoords] = useState<GeoPoint | null>(
+    customer?.savedCoords ?? null
+  );
+  const [profileGpsNotice, setProfileGpsNotice] = useState('');
   const [profileSaved, setProfileSaved] = useState('');
   const [currentPasscode, setCurrentPasscode] = useState('');
   const [newPasscode, setNewPasscode] = useState('');
@@ -113,18 +121,19 @@ export function CustomerAccountModal({
         setOrders(fetchedOrders);
         setComplaints(res.data.complaints || []);
         setKasbonList(res.data.kasbon || []);
-        if (fetchedOrders.length > 0 && !selectedOrderNo) {
-          setSelectedOrderNo(fetchedOrders[0].orderNumber);
+        if (fetchedOrders.length > 0) {
+          setSelectedOrderNo((prev) => prev || fetchedOrders[0].orderNumber);
         }
         if (res.data.customer) {
           setEditName(res.data.customer.name);
           setEditAddr(res.data.customer.defaultAddress);
+          setEditSavedCoords(res.data.customer.savedCoords ?? null);
         }
       }
     } finally {
       setLoadingData(false);
     }
-  }, [customerToken, selectedOrderNo]);
+  }, [customerToken]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -137,6 +146,7 @@ export function CustomerAccountModal({
     if (customer) {
       setEditName(customer.name);
       setEditAddr(customer.defaultAddress);
+      setEditSavedCoords(customer.savedCoords ?? null);
     }
   }, [customer]);
 
@@ -270,6 +280,30 @@ export function CustomerAccountModal({
     }
   };
 
+  const handleCaptureProfileGps = () => {
+    if (!navigator.geolocation) {
+      setProfileGpsNotice('Browser tidak mendukung GPS.');
+      return;
+    }
+    setProfileGpsNotice('Mengambil koordinat GPS rumah...');
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const pt: GeoPoint = {
+          lat: Number(pos.coords.latitude.toFixed(6)),
+          lng: Number(pos.coords.longitude.toFixed(6)),
+        };
+        setEditSavedCoords(pt);
+        setProfileGpsNotice(
+          `Titik rumah disiapkan (${pt.lat.toFixed(4)}, ${pt.lng.toFixed(4)}). Klik Simpan Profil.`
+        );
+      },
+      () => {
+        setProfileGpsNotice('Izin GPS belum aktif.');
+      },
+      {enableHighAccuracy: true, timeout: 8000}
+    );
+  };
+
   const handleSaveProfile = async (e: FormEvent) => {
     e.preventDefault();
     if (!customerToken) return;
@@ -283,11 +317,12 @@ export function CustomerAccountModal({
       body: JSON.stringify({
         name: editName.trim(),
         defaultAddress: editAddr.trim(),
+        savedCoords: editSavedCoords,
       }),
     });
     if (res.ok && res.data.customer) {
       onAuthenticated(customerToken, res.data.customer);
-      setProfileSaved('Profil & alamat pengiriman tersimpan.');
+      setProfileSaved('Profil, alamat & pin lokasi tersimpan.');
     }
   };
 
@@ -595,56 +630,120 @@ export function CustomerAccountModal({
                     </div>
                   ) : (
                     <div className="space-y-4">
-                      {orders.map((ord) => {
-                        const latestWa = ord.whatsappNotifications?.[0];
-                        return (
-                          <div
-                            key={ord.id}
-                            className="border border-zinc-200 rounded-xl p-4 bg-white space-y-3"
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {(
+                          [
+                            ['ALL', `Semua (${orders.length})`],
+                            [
+                              'ACTIVE',
+                              `Aktif (${orders.filter((o) => ['MENUNGGU', 'DISIAPKAN', 'DIANTAR'].includes(o.status)).length})`,
+                            ],
+                            [
+                              'DONE',
+                              `Selesai (${orders.filter((o) => o.status === 'SELESAI').length})`,
+                            ],
+                            [
+                              'CANCELLED',
+                              `Batal (${orders.filter((o) => o.status === 'DIBATALKAN').length})`,
+                            ],
+                          ] as const
+                        ).map(([id, label]) => (
+                          <button
+                            key={id}
+                            type="button"
+                            onClick={() => setOrderFilter(id)}
+                            className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold cursor-pointer ${
+                              orderFilter === id
+                                ? 'bg-[#14532D] text-white'
+                                : 'border border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50'
+                            }`}
                           >
-                            <div className="flex flex-wrap items-start justify-between gap-2">
-                              <div>
-                                <p className="font-mono text-xs font-semibold text-[#14532D] tabular-price">
-                                  {ord.orderNumber} · {formatShortDate(ord.createdAt)}
-                                </p>
-                                <p className="text-sm font-bold text-zinc-900 mt-0.5">
-                                  {ORDER_STATUS_LABELS[ord.status]}
-                                </p>
-                                <p className="text-[11px] text-zinc-500 mt-0.5">
-                                  {ord.paymentMethod} ·{' '}
-                                  {ord.paymentStatus
-                                    ? PAYMENT_STATUS_LABELS[ord.paymentStatus]
-                                    : 'Tunai/COD'}
-                                </p>
-                              </div>
-                              <p className="text-base font-bold text-zinc-900 tabular-price">
-                                {formatRupiah(ord.total)}
-                              </p>
-                            </div>
+                            {label}
+                          </button>
+                        ))}
+                      </div>
 
-                            <div className="text-xs text-zinc-600 bg-zinc-50 rounded-lg p-3 space-y-1">
-                              {ord.items.map((item, idx) => (
-                                <div key={idx} className="flex justify-between gap-2">
-                                  <span>
-                                    {item.productName} ({item.variantLabel}) x{item.quantity}
-                                  </span>
-                                  <span className="tabular-price font-medium">
-                                    {formatRupiah(item.unitPrice * item.quantity)}
-                                  </span>
+                      {orders
+                        .filter((o) => {
+                          if (orderFilter === 'ACTIVE')
+                            return ['MENUNGGU', 'DISIAPKAN', 'DIANTAR'].includes(o.status);
+                          if (orderFilter === 'DONE') return o.status === 'SELESAI';
+                          if (orderFilter === 'CANCELLED') return o.status === 'DIBATALKAN';
+                          return true;
+                        })
+                        .map((ord) => {
+                          const latestWa = ord.whatsappNotifications?.[0];
+                          return (
+                            <div
+                              key={ord.id}
+                              className="border border-zinc-200 rounded-xl p-4 bg-white space-y-3"
+                            >
+                              <div className="flex flex-wrap items-start justify-between gap-2">
+                                <div>
+                                  <p className="font-mono text-xs font-semibold text-[#14532D] tabular-price">
+                                    {ord.orderNumber} · {formatShortDate(ord.createdAt)}
+                                  </p>
+                                  <p className="text-sm font-bold text-zinc-900 mt-0.5">
+                                    {ORDER_STATUS_LABELS[ord.status]}
+                                  </p>
+                                  <p className="text-[11px] text-zinc-500 mt-0.5">
+                                    {ord.paymentMethod} ·{' '}
+                                    {ord.paymentStatus
+                                      ? PAYMENT_STATUS_LABELS[ord.paymentStatus]
+                                      : 'Tunai/COD'}
+                                  </p>
                                 </div>
-                              ))}
-                            </div>
-
-                            {latestWa && (
-                              <div className="rounded-lg bg-emerald-50 border border-emerald-200 p-3 text-[11px] text-emerald-950 space-y-1">
-                                <p className="font-semibold">
-                                  Notifikasi WhatsApp ({latestWa.trigger}) · {formatShortDate(latestWa.sentAt)}
-                                </p>
-                                <p className="whitespace-pre-line text-emerald-900">
-                                  {latestWa.message}
+                                <p className="text-base font-bold text-zinc-900 tabular-price">
+                                  {formatRupiah(ord.total)}
                                 </p>
                               </div>
-                            )}
+
+                              <div className="text-xs text-zinc-600 bg-zinc-50 rounded-lg p-3 space-y-1">
+                                {ord.items.map((item, idx) => (
+                                  <div key={idx} className="flex justify-between gap-2">
+                                    <span>
+                                      {item.productName} ({item.variantLabel}) x{item.quantity}
+                                    </span>
+                                    <span className="tabular-price font-medium">
+                                      {formatRupiah(item.unitPrice * item.quantity)}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+
+                              {(ord.tracking?.proofNote || ord.tracking?.proofPhoto) && (
+                                <div className="rounded-lg bg-zinc-50 border border-zinc-200 p-3 flex items-center gap-3 text-xs">
+                                  {ord.tracking?.proofPhoto && (
+                                    <img
+                                      src={ord.tracking.proofPhoto}
+                                      alt={`Bukti serah terima ${ord.orderNumber}`}
+                                      className="w-12 h-12 rounded-md object-cover border border-zinc-200 shrink-0"
+                                    />
+                                  )}
+                                  <div>
+                                    <p className="font-semibold text-zinc-800">
+                                      Bukti Serah Terima Kurir
+                                    </p>
+                                    {ord.tracking?.proofNote && (
+                                      <p className="text-zinc-600 mt-0.5">
+                                        {ord.tracking.proofNote}
+                                      </p>
+                                    )}
+                                  </div>
+                                </div>
+                              )}
+
+                              {latestWa && (
+                                <div className="rounded-lg bg-emerald-50 border border-emerald-200 p-3 text-[11px] text-emerald-950 space-y-1">
+                                  <p className="font-semibold">
+                                    Notifikasi WhatsApp ({latestWa.trigger}) ·{' '}
+                                    {formatShortDate(latestWa.sentAt)}
+                                  </p>
+                                  <p className="whitespace-pre-line text-emerald-900">
+                                    {latestWa.message}
+                                  </p>
+                                </div>
+                              )}
 
                             <div className="flex flex-wrap items-center gap-2 pt-1">
                               <button
@@ -922,6 +1021,18 @@ export function CustomerAccountModal({
                 <div className="space-y-6 max-w-md">
                   <form onSubmit={handleSaveProfile} className="space-y-4">
                     <div>
+                      <label htmlFor="prof-phone" className="block text-xs text-zinc-600 mb-1">
+                        Nomor HP / WhatsApp Terdaftar
+                      </label>
+                      <input
+                        id="prof-phone"
+                        type="text"
+                        disabled
+                        value={customer.phone}
+                        className="w-full px-3 py-2 min-h-[40px] text-sm font-mono bg-zinc-100 text-zinc-600 border border-zinc-200 rounded-lg"
+                      />
+                    </div>
+                    <div>
                       <label htmlFor="prof-name" className="block text-xs text-zinc-600 mb-1">
                         Nama Pemesan
                       </label>
@@ -946,6 +1057,43 @@ export function CustomerAccountModal({
                         onChange={(e) => setEditAddr(e.target.value)}
                         className="w-full px-3 py-2 min-h-[40px] text-sm border border-zinc-300 rounded-lg"
                       />
+                    </div>
+                    <div className="space-y-2 rounded-lg border border-zinc-200 bg-zinc-50 p-3">
+                      <p className="text-xs font-medium text-zinc-800">
+                        Pin Lokasi GPS Rumah (Opsional, otomatis ikut saat pesan COD)
+                      </p>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={handleCaptureProfileGps}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-zinc-300 bg-white text-xs font-medium text-zinc-800 hover:bg-zinc-50 cursor-pointer"
+                        >
+                          <MapPin className="w-3.5 h-3.5 text-[#14532D]" />
+                          <span>
+                            {editSavedCoords ? 'Perbarui Pin GPS Rumah' : 'Simpan Pin GPS Saat Ini'}
+                          </span>
+                        </button>
+                        {editSavedCoords && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditSavedCoords(null);
+                              setProfileGpsNotice('Pin lokasi akan dihapus setelah klik Simpan.');
+                            }}
+                            className="text-xs text-zinc-500 hover:text-red-700 cursor-pointer"
+                          >
+                            Hapus Pin
+                          </button>
+                        )}
+                      </div>
+                      {editSavedCoords && (
+                        <p className="text-[11px] font-mono text-[#14532D]">
+                          Tersimpan: {editSavedCoords.lat.toFixed(4)}, {editSavedCoords.lng.toFixed(4)}
+                        </p>
+                      )}
+                      {profileGpsNotice && (
+                        <p className="text-[11px] text-zinc-600">{profileGpsNotice}</p>
+                      )}
                     </div>
                     {profileSaved && (
                       <p className="text-xs text-[#14532D] bg-emerald-50 border border-emerald-200 rounded-lg p-2.5">

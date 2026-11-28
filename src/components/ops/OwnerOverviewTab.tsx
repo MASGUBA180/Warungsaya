@@ -96,6 +96,11 @@ export function OwnerOverviewTab({
   // Period filter state for Overview
   const [period, setPeriod] = useState<OverviewPeriod>('all');
 
+  // Audit log filter & expand state
+  const [auditSearch, setAuditSearch] = useState('');
+  const [auditRoleFilter, setAuditRoleFilter] = useState<'ALL' | DivisionRole>('ALL');
+  const [showAllAudit, setShowAllAudit] = useState(false);
+
   // Staff creation & management state
   const [displayName, setDisplayName] = useState('');
   const [username, setUsername] = useState('');
@@ -117,6 +122,13 @@ export function OwnerOverviewTab({
   const [confirmDeleteStaffId, setConfirmDeleteStaffId] = useState<string | null>(null);
 
   // Settings form state
+  const [storeNameInput, setStoreNameInput] = useState(settings.name);
+  const [taglineInput, setTaglineInput] = useState(settings.tagline);
+  const [streetAddressInput, setStreetAddressInput] = useState(settings.streetAddress);
+  const [districtInput, setDistrictInput] = useState(settings.district);
+  const [provinceInput, setProvinceInput] = useState(settings.province);
+  const [fullAddressInput, setFullAddressInput] = useState(settings.fullAddress);
+  const [mapsUrlInput, setMapsUrlInput] = useState(settings.mapsUrl);
   const [hours, setHours] = useState(settings.hours);
   const [daysOpen, setDaysOpen] = useState(settings.daysOpen);
   const [deliveryArea, setDeliveryArea] = useState(settings.deliveryArea);
@@ -133,11 +145,25 @@ export function OwnerOverviewTab({
   const [settingsSavedMsg, setSettingsSavedMsg] = useState('');
 
   useEffect(() => {
+    setStoreNameInput(settings.name);
+    setTaglineInput(settings.tagline);
+    setStreetAddressInput(settings.streetAddress);
+    setDistrictInput(settings.district);
+    setProvinceInput(settings.province);
+    setFullAddressInput(settings.fullAddress);
+    setMapsUrlInput(settings.mapsUrl);
     setStoreCoords(settings.storeCoords ?? null);
     setWhatsappNumber(settings.whatsappNumber || '6281279008899');
     setQrisMerchantName(settings.qrisMerchantName || 'TOKO DIMAS JAYA');
     setQrisNmid(settings.qrisNmid || 'ID1020260000188');
   }, [
+    settings.name,
+    settings.tagline,
+    settings.streetAddress,
+    settings.district,
+    settings.province,
+    settings.fullAddress,
+    settings.mapsUrl,
     settings.storeCoords,
     settings.whatsappNumber,
     settings.qrisMerchantName,
@@ -244,6 +270,19 @@ export function OwnerOverviewTab({
       .sort((a, b) => b.qty - a.qty || b.revenue - a.revenue)
       .slice(0, 5);
 
+    const validOrders = filteredOrders.filter((o) => o.status !== 'DIBATALKAN');
+    const posCount = validOrders.filter((o) => o.source === 'POS').length;
+    const onlineCount = validOrders.filter((o) => o.source === 'ONLINE').length;
+    const tunaiTotal = validOrders
+      .filter((o) => o.paymentMethod === 'TUNAI')
+      .reduce((s, o) => s + o.total, 0);
+    const qrisTotal = validOrders
+      .filter((o) => o.paymentMethod === 'QRIS')
+      .reduce((s, o) => s + o.total, 0);
+    const kasbonTotal = validOrders
+      .filter((o) => o.paymentMethod === 'KASBON')
+      .reduce((s, o) => s + o.total, 0);
+
     return {
       filteredOrders,
       rev,
@@ -252,8 +291,55 @@ export function OwnerOverviewTab({
       profit,
       trendDays: days,
       topProducts,
+      posCount,
+      onlineCount,
+      tunaiTotal,
+      qrisTotal,
+      kasbonTotal,
     };
   }, [period, orders, ledger, overview]);
+
+  const filteredAuditLogs = useMemo(() => {
+    const q = auditSearch.trim().toLowerCase();
+    return auditLogs.filter((log) => {
+      if (auditRoleFilter !== 'ALL' && log.actorRole !== auditRoleFilter) return false;
+      if (
+        q &&
+        !log.actorName.toLowerCase().includes(q) &&
+        !log.action.toLowerCase().includes(q) &&
+        !log.target.toLowerCase().includes(q) &&
+        !log.detail.toLowerCase().includes(q)
+      ) {
+        return false;
+      }
+      return true;
+    });
+  }, [auditLogs, auditSearch, auditRoleFilter]);
+
+  const handleExportAuditCsv = () => {
+    const header = ['Waktu', 'Petugas', 'Peran', 'Aksi', 'Target', 'Detail'];
+    const rows = filteredAuditLogs.map((l) => [
+      l.createdAt,
+      l.actorName.replace(/"/g, '""'),
+      l.actorRole,
+      l.action,
+      l.target.replace(/"/g, '""'),
+      l.detail.replace(/"/g, '""'),
+    ]);
+    const csvContent = [
+      header.join(','),
+      ...rows.map((r) => r.map((cell) => `"${cell}"`).join(',')),
+    ].join('\n');
+    const blob = new Blob([csvContent], {type: 'text/csv;charset=utf-8;'});
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `log-audit-toko-dimas-jaya-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
 
   const handleExportReportCsv = () => {
     const header = [
@@ -466,6 +552,13 @@ export function OwnerOverviewTab({
           Authorization: `Bearer ${authToken}`,
         },
         body: JSON.stringify({
+          name: storeNameInput.trim(),
+          tagline: taglineInput.trim(),
+          streetAddress: streetAddressInput.trim(),
+          district: districtInput.trim(),
+          province: provinceInput.trim(),
+          fullAddress: fullAddressInput.trim(),
+          mapsUrl: mapsUrlInput.trim(),
           hours,
           daysOpen,
           deliveryArea,
@@ -477,7 +570,7 @@ export function OwnerOverviewTab({
         }),
       });
       if (res.ok) {
-        setSettingsSavedMsg('Pengaturan toko diperbarui.');
+        setSettingsSavedMsg('Pengaturan & identitas toko diperbarui.');
         await onRefresh();
       }
     } finally {
@@ -945,6 +1038,104 @@ export function OwnerOverviewTab({
             />
           </div>
 
+          <div className="pt-2 border-t border-zinc-100 space-y-4">
+            <p className="text-xs font-semibold text-zinc-800">
+              Identitas Etalase &amp; Alamat Publik Toko
+            </p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label htmlFor="set-store-name" className="block text-xs text-zinc-600 mb-1">
+                  Nama Toko
+                </label>
+                <input
+                  id="set-store-name"
+                  type="text"
+                  value={storeNameInput}
+                  onChange={(e) => setStoreNameInput(e.target.value)}
+                  className="w-full px-3 py-2 min-h-[40px] text-sm border border-zinc-300 rounded-lg"
+                />
+              </div>
+              <div>
+                <label htmlFor="set-tagline" className="block text-xs text-zinc-600 mb-1">
+                  Tagline Etalase
+                </label>
+                <input
+                  id="set-tagline"
+                  type="text"
+                  value={taglineInput}
+                  onChange={(e) => setTaglineInput(e.target.value)}
+                  className="w-full px-3 py-2 min-h-[40px] text-sm border border-zinc-300 rounded-lg"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div>
+                <label htmlFor="set-street" className="block text-xs text-zinc-600 mb-1">
+                  Jalan / Gang
+                </label>
+                <input
+                  id="set-street"
+                  type="text"
+                  value={streetAddressInput}
+                  onChange={(e) => setStreetAddressInput(e.target.value)}
+                  className="w-full px-3 py-2 min-h-[40px] text-sm border border-zinc-300 rounded-lg"
+                />
+              </div>
+              <div>
+                <label htmlFor="set-district" className="block text-xs text-zinc-600 mb-1">
+                  Kampung / Kecamatan / Kabupaten
+                </label>
+                <input
+                  id="set-district"
+                  type="text"
+                  value={districtInput}
+                  onChange={(e) => setDistrictInput(e.target.value)}
+                  className="w-full px-3 py-2 min-h-[40px] text-sm border border-zinc-300 rounded-lg"
+                />
+              </div>
+              <div>
+                <label htmlFor="set-province" className="block text-xs text-zinc-600 mb-1">
+                  Provinsi &amp; Kode Pos
+                </label>
+                <input
+                  id="set-province"
+                  type="text"
+                  value={provinceInput}
+                  onChange={(e) => setProvinceInput(e.target.value)}
+                  className="w-full px-3 py-2 min-h-[40px] text-sm border border-zinc-300 rounded-lg"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label htmlFor="set-full-addr" className="block text-xs text-zinc-600 mb-1">
+                  Alamat Lengkap (Untuk Footer &amp; Pelanggan)
+                </label>
+                <input
+                  id="set-full-addr"
+                  type="text"
+                  value={fullAddressInput}
+                  onChange={(e) => setFullAddressInput(e.target.value)}
+                  className="w-full px-3 py-2 min-h-[40px] text-sm border border-zinc-300 rounded-lg"
+                />
+              </div>
+              <div>
+                <label htmlFor="set-maps-url" className="block text-xs text-zinc-600 mb-1">
+                  Tautan Google Maps Toko (https://...)
+                </label>
+                <input
+                  id="set-maps-url"
+                  type="url"
+                  value={mapsUrlInput}
+                  onChange={(e) => setMapsUrlInput(e.target.value)}
+                  className="w-full px-3 py-2 min-h-[40px] text-sm font-mono border border-zinc-300 rounded-lg"
+                />
+              </div>
+            </div>
+          </div>
+
           <div className="space-y-3 pt-2 border-t border-zinc-100">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
@@ -1101,6 +1292,34 @@ export function OwnerOverviewTab({
           <p className="text-xs text-zinc-500">Piutang Kasbon Aktif</p>
           <p className="text-xl font-bold text-amber-700 tabular-price mt-1">
             {formatRupiah(overview.totalKasbonOutstanding)}
+          </p>
+        </div>
+      </div>
+
+      {/* Sumber Transaksi & Ringkasan Metode Pembayaran */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="bg-white border border-zinc-200 rounded-xl p-4">
+          <p className="text-xs text-zinc-500">Sumber Order (Aktif / Selesai)</p>
+          <p className="text-sm font-bold text-zinc-900 tabular-price mt-1">
+            POS {analytics.posCount} · Online {analytics.onlineCount}
+          </p>
+        </div>
+        <div className="bg-white border border-zinc-200 rounded-xl p-4">
+          <p className="text-xs text-zinc-500">Omzet Tunai</p>
+          <p className="text-sm font-bold text-zinc-900 tabular-price mt-1">
+            {formatRupiah(analytics.tunaiTotal)}
+          </p>
+        </div>
+        <div className="bg-white border border-zinc-200 rounded-xl p-4">
+          <p className="text-xs text-zinc-500">Omzet QRIS Dinamis</p>
+          <p className="text-sm font-bold text-[#14532D] tabular-price mt-1">
+            {formatRupiah(analytics.qrisTotal)}
+          </p>
+        </div>
+        <div className="bg-white border border-zinc-200 rounded-xl p-4">
+          <p className="text-xs text-zinc-500">Omzet Bon / Kasbon</p>
+          <p className="text-sm font-bold text-amber-700 tabular-price mt-1">
+            {formatRupiah(analytics.kasbonTotal)}
           </p>
         </div>
       </div>
@@ -1422,6 +1641,22 @@ export function OwnerOverviewTab({
                       Tunai {formatRupiah(sh.expectedCash)}
                     </p>
                     <p className="text-zinc-500">QRIS {formatRupiah(sh.qrisSalesTotal)}</p>
+                    {sh.status === 'DITUTUP' && sh.discrepancy !== undefined && (
+                      <p
+                        className={`text-[11px] font-semibold mt-0.5 ${
+                          sh.discrepancy === 0
+                            ? 'text-[#14532D]'
+                            : sh.discrepancy > 0
+                              ? 'text-zinc-700'
+                              : 'text-red-700'
+                        }`}
+                      >
+                        Selisih laci:{' '}
+                        {sh.discrepancy === 0
+                          ? 'Pas (Rp 0)'
+                          : `${sh.discrepancy > 0 ? '+' : '-'}${formatRupiah(Math.abs(sh.discrepancy))}`}
+                      </p>
+                    )}
                   </div>
                 </div>
               ))}
@@ -1430,35 +1665,89 @@ export function OwnerOverviewTab({
         </div>
 
         <div className="lg:col-span-7 bg-white border border-zinc-200 rounded-xl overflow-hidden">
-          <div className="px-5 py-4 border-b border-zinc-200">
-            <h3 className="text-sm font-semibold text-zinc-900">
-              Log Audit Aktivitas Penting
-            </h3>
+          <div className="px-5 py-4 border-b border-zinc-200 flex flex-wrap items-center justify-between gap-2.5">
+            <div>
+              <h3 className="text-sm font-semibold text-zinc-900">
+                Log Audit Aktivitas Penting
+              </h3>
+              <p className="text-[11px] text-zinc-500 tabular-price">
+                Menampilkan {showAllAudit ? filteredAuditLogs.length : Math.min(10, filteredAuditLogs.length)}{' '}
+                dari {filteredAuditLogs.length} catatan
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 print:hidden">
+              <input
+                type="search"
+                value={auditSearch}
+                onChange={(e) => setAuditSearch(e.target.value)}
+                placeholder="Cari petugas / aksi..."
+                aria-label="Cari log audit"
+                className="px-2.5 py-1 text-xs border border-zinc-300 rounded-lg w-36"
+              />
+              <select
+                aria-label="Filter peran audit"
+                value={auditRoleFilter}
+                onChange={(e) => setAuditRoleFilter(e.target.value as 'ALL' | DivisionRole)}
+                className="px-2 py-1 text-xs bg-white border border-zinc-300 rounded-lg"
+              >
+                <option value="ALL">Semua Peran</option>
+                <option value="PEMILIK">Pemilik</option>
+                <option value="DIREKTUR">Direktur</option>
+                <option value="KEUANGAN">Keuangan</option>
+                <option value="KASIR">Kasir</option>
+                <option value="GUDANG">Gudang</option>
+                <option value="KURIR">Kurir</option>
+                <option value="PEMASOK">Pemasok</option>
+              </select>
+              <button
+                type="button"
+                onClick={handleExportAuditCsv}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-zinc-300 bg-white text-xs font-medium text-zinc-800 hover:bg-zinc-50 cursor-pointer"
+              >
+                <Download className="w-3 h-3 text-[#14532D]" aria-hidden="true" />
+                <span>CSV</span>
+              </button>
+            </div>
           </div>
-          {auditLogs.length === 0 ? (
+          {filteredAuditLogs.length === 0 ? (
             <div className="p-6 text-center text-xs text-zinc-500">
-              Belum ada catatan audit terbaru.
+              Tidak ada catatan audit pada filter ini.
             </div>
           ) : (
-            <div className="divide-y divide-zinc-100 text-xs">
-              {auditLogs.slice(0, 10).map((log) => (
-                <div key={log.id} className="px-5 py-2.5 flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <p className="text-zinc-900">
-                      <span className="font-semibold">{log.actorName}</span>{' '}
-                      <span className="text-zinc-500">({log.actorRole})</span> ·{' '}
-                      <span className="font-mono text-[#14532D]">{log.action}</span>
-                    </p>
-                    <p className="text-zinc-600 truncate mt-0.5">
-                      {log.target} — {log.detail}
-                    </p>
+            <>
+              <div className="divide-y divide-zinc-100 text-xs max-h-96 overflow-y-auto">
+                {(showAllAudit ? filteredAuditLogs : filteredAuditLogs.slice(0, 10)).map((log) => (
+                  <div key={log.id} className="px-5 py-2.5 flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-zinc-900">
+                        <span className="font-semibold">{log.actorName}</span>{' '}
+                        <span className="text-zinc-500">({log.actorRole})</span> ·{' '}
+                        <span className="font-mono text-[#14532D]">{log.action}</span>
+                      </p>
+                      <p className="text-zinc-600 truncate mt-0.5">
+                        {log.target} — {log.detail}
+                      </p>
+                    </div>
+                    <span className="text-zinc-400 whitespace-nowrap shrink-0">
+                      {formatShortDate(log.createdAt)}
+                    </span>
                   </div>
-                  <span className="text-zinc-400 whitespace-nowrap shrink-0">
-                    {formatShortDate(log.createdAt)}
-                  </span>
+                ))}
+              </div>
+              {filteredAuditLogs.length > 10 && (
+                <div className="px-5 py-2.5 border-t border-zinc-100 bg-zinc-50 text-center print:hidden">
+                  <button
+                    type="button"
+                    onClick={() => setShowAllAudit((v) => !v)}
+                    className="text-xs font-semibold text-[#14532D] hover:underline cursor-pointer"
+                  >
+                    {showAllAudit
+                      ? 'Ringkas (10 Teratas)'
+                      : `Tampilkan Semua (${filteredAuditLogs.length})`}
+                  </button>
                 </div>
-              ))}
-            </div>
+              )}
+            </>
           )}
         </div>
       </div>

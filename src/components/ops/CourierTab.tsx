@@ -64,11 +64,55 @@ export function CourierTab({
     : 0;
 
   const [filterScope, setFilterScope] = useState<'ALL' | 'MINE'>('ALL');
-  const activeDeliveries =
+  const [statusFilter, setStatusFilter] = useState<'ALL' | 'PICKUP_READY' | 'ON_WAY'>('ALL');
+  const [activeSearch, setActiveSearch] = useState('');
+  const [historySearch, setHistorySearch] = useState('');
+
+  const scopedActiveDeliveries =
     filterScope === 'MINE' && currentUser
       ? allActiveDeliveries.filter((o) => o.assignedCourierId === currentUser.id)
       : allActiveDeliveries;
+
+  const activeNorm = activeSearch.trim().toLowerCase();
+  const activeDeliveries = scopedActiveDeliveries.filter((o) => {
+    if (statusFilter === 'PICKUP_READY' && o.status === 'DIANTAR') return false;
+    if (statusFilter === 'ON_WAY' && o.status !== 'DIANTAR') return false;
+    if (
+      activeNorm &&
+      !o.orderNumber.toLowerCase().includes(activeNorm) &&
+      !o.customerName.toLowerCase().includes(activeNorm) &&
+      !o.addressNote.toLowerCase().includes(activeNorm) &&
+      !o.phone.toLowerCase().includes(activeNorm)
+    ) {
+      return false;
+    }
+    return true;
+  });
+
   const completedDeliveries = codOrders.filter((o) => o.status === 'SELESAI');
+  const histNorm = historySearch.trim().toLowerCase();
+  const filteredCompletedDeliveries = completedDeliveries.filter(
+    (o) =>
+      !histNorm ||
+      o.orderNumber.toLowerCase().includes(histNorm) ||
+      o.customerName.toLowerCase().includes(histNorm) ||
+      o.addressNote.toLowerCase().includes(histNorm)
+  );
+
+  // Daily COD summary
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+  const todayCutoff = todayStart.getTime();
+  const completedToday = completedDeliveries.filter((o) => {
+    const ts = new Date(o.updatedAt || o.createdAt).getTime();
+    return Number.isFinite(ts) && ts >= todayCutoff;
+  });
+  const codCashTodayTotal = completedToday
+    .filter((o) => o.paymentMethod !== 'QRIS')
+    .reduce((sum, o) => sum + o.total, 0);
+  const qrisCodTodayTotal = completedToday
+    .filter((o) => o.paymentMethod === 'QRIS')
+    .reduce((sum, o) => sum + o.total, 0);
 
   const [selectedOrderId, setSelectedOrderId] = useState<string>('');
   const [checkpoint, setCheckpoint] = useState<DeliveryCheckpoint>('MENUJU_LOKASI');
@@ -308,6 +352,34 @@ export function CourierTab({
 
   return (
     <div className="space-y-8">
+      {/* Rekap Tugas & Setoran COD Hari Ini */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="bg-white border border-zinc-200 rounded-xl p-4">
+          <p className="text-xs text-zinc-500">Antrean COD Aktif</p>
+          <p className="text-xl font-bold text-zinc-900 tabular-price mt-1">
+            {scopedActiveDeliveries.length}
+          </p>
+        </div>
+        <div className="bg-white border border-zinc-200 rounded-xl p-4">
+          <p className="text-xs text-zinc-500">Selesai Antar Hari Ini</p>
+          <p className="text-xl font-bold text-[#14532D] tabular-price mt-1">
+            {completedToday.length}
+          </p>
+        </div>
+        <div className="bg-white border border-zinc-200 rounded-xl p-4">
+          <p className="text-xs text-zinc-500">Tunai COD Perlu Disetor</p>
+          <p className="text-xl font-bold text-zinc-900 tabular-price mt-1">
+            {formatRupiah(codCashTodayTotal)}
+          </p>
+        </div>
+        <div className="bg-white border border-zinc-200 rounded-xl p-4">
+          <p className="text-xs text-zinc-500">QRIS COD Lunas Hari Ini</p>
+          <p className="text-xl font-bold text-[#14532D] tabular-price mt-1">
+            {formatRupiah(qrisCodTodayTotal)}
+          </p>
+        </div>
+      </div>
+
       {/* Interactive Courier Map & Live Position Panel */}
       {selectedOrder && (
         <div className="bg-white border border-zinc-200 rounded-xl p-5 sm:p-6 space-y-5">
@@ -545,39 +617,84 @@ export function CourierTab({
             </p>
           </div>
 
-          {currentUser?.role === 'KURIR' && (
-            <div className="flex items-center gap-1.5">
-              <button
-                type="button"
-                onClick={() => setFilterScope('ALL')}
-                className={`px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap ${
-                  filterScope === 'ALL'
-                    ? 'bg-[#14532D] text-white'
-                    : 'bg-white border border-zinc-200 text-zinc-700 hover:bg-zinc-50'
-                }`}
-              >
-                Semua Antrean ({allActiveDeliveries.length})
-              </button>
-              <button
-                type="button"
-                onClick={() => setFilterScope('MINE')}
-                className={`px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap ${
-                  filterScope === 'MINE'
-                    ? 'bg-[#14532D] text-white'
-                    : 'bg-white border border-zinc-200 text-zinc-700 hover:bg-zinc-50'
-                }`}
-              >
-                Tugas Saya ({myAssignedCount})
-              </button>
-            </div>
-          )}
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              type="search"
+              value={activeSearch}
+              onChange={(e) => setActiveSearch(e.target.value)}
+              placeholder="Cari kode, nama, alamat..."
+              aria-label="Cari antrean pengantaran"
+              className="px-3 py-1.5 text-xs bg-white border border-zinc-300 rounded-lg w-48"
+            />
+            {currentUser?.role === 'KURIR' && (
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setFilterScope('ALL')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap ${
+                    filterScope === 'ALL'
+                      ? 'bg-[#14532D] text-white'
+                      : 'bg-white border border-zinc-200 text-zinc-700 hover:bg-zinc-50'
+                  }`}
+                >
+                  Semua ({allActiveDeliveries.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFilterScope('MINE')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap ${
+                    filterScope === 'MINE'
+                      ? 'bg-[#14532D] text-white'
+                      : 'bg-white border border-zinc-200 text-zinc-700 hover:bg-zinc-50'
+                  }`}
+                >
+                  Tugas Saya ({myAssignedCount})
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="mt-3 flex flex-wrap items-center gap-1.5">
+          {(
+            [
+              {id: 'ALL', label: `Semua (${scopedActiveDeliveries.length})`},
+              {
+                id: 'PICKUP_READY',
+                label: `Perlu Diambil (${
+                  scopedActiveDeliveries.filter((o) => o.status !== 'DIANTAR').length
+                })`,
+              },
+              {
+                id: 'ON_WAY',
+                label: `Sedang Diantar (${
+                  scopedActiveDeliveries.filter((o) => o.status === 'DIANTAR').length
+                })`,
+              },
+            ] as {id: 'ALL' | 'PICKUP_READY' | 'ON_WAY'; label: string}[]
+          ).map((chip) => (
+            <button
+              key={chip.id}
+              type="button"
+              onClick={() => setStatusFilter(chip.id)}
+              className={`px-2.5 py-1 rounded-md text-xs font-medium cursor-pointer whitespace-nowrap ${
+                statusFilter === chip.id
+                  ? 'bg-zinc-900 text-white'
+                  : 'bg-white border border-zinc-200 text-zinc-700 hover:bg-zinc-50'
+              }`}
+            >
+              {chip.label}
+            </button>
+          ))}
         </div>
 
         {activeDeliveries.length === 0 ? (
           <div className="mt-4 bg-white border border-zinc-200 rounded-xl p-8 text-center text-sm text-zinc-500">
-            {filterScope === 'MINE'
+            {filterScope === 'MINE' && scopedActiveDeliveries.length === 0
               ? 'Belum ada pesanan COD yang ditugaskan khusus ke akun Anda.'
-              : 'Semua pengantaran COD saat ini sudah selesai.'}
+              : allActiveDeliveries.length === 0
+                ? 'Semua pengantaran COD saat ini sudah selesai.'
+                : 'Tidak ada pesanan pada filter pengantaran ini.'}
           </div>
         ) : (
           <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -680,15 +797,26 @@ export function CourierTab({
                           {sendingWaId === ord.id ? 'Mencatat...' : 'Log Notif WA'}
                         </button>
                       </div>
-                      <a
-                        href={directWaLink}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-[#14532D] hover:underline"
-                      >
-                        <span>Buka Chat WhatsApp Pelanggan</span>
-                        <ExternalLink className="w-3 h-3" aria-hidden="true" />
-                      </a>
+                      <div className="flex flex-wrap items-center gap-3 pt-0.5">
+                        <a
+                          href={directWaLink}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-[#14532D] hover:underline"
+                        >
+                          <span>Buka Chat WhatsApp Pelanggan</span>
+                          <ExternalLink className="w-3 h-3" aria-hidden="true" />
+                        </a>
+                        {ord.phone && ord.phone !== '-' && (
+                          <a
+                            href={`tel:${ord.phone.replace(/[^0-9+]/g, '')}`}
+                            className="inline-flex items-center gap-1 text-[11px] font-semibold text-zinc-800 hover:underline"
+                          >
+                            <Phone className="w-3 h-3" aria-hidden="true" />
+                            <span>Telepon Langsung</span>
+                          </a>
+                        )}
+                      </div>
                     </div>
                   </div>
 
@@ -735,12 +863,28 @@ export function CourierTab({
 
       {/* Completed COD History */}
       <div className="bg-white border border-zinc-200 rounded-xl overflow-hidden">
-        <div className="px-6 py-4 border-b border-zinc-200">
-          <h3 className="text-base font-semibold text-zinc-900">Riwayat Pengantaran Selesai</h3>
+        <div className="px-6 py-4 border-b border-zinc-200 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="text-base font-semibold text-zinc-900">Riwayat Pengantaran Selesai</h3>
+            <p className="text-xs text-zinc-500 mt-0.5 tabular-price">
+              Menampilkan {Math.min(15, filteredCompletedDeliveries.length)} dari{' '}
+              {completedDeliveries.length} pengantaran selesai
+            </p>
+          </div>
+          <input
+            type="search"
+            value={historySearch}
+            onChange={(e) => setHistorySearch(e.target.value)}
+            placeholder="Cari riwayat pengantaran..."
+            aria-label="Cari riwayat pengantaran"
+            className="px-3 py-1.5 text-xs border border-zinc-300 rounded-lg w-48"
+          />
         </div>
-        {completedDeliveries.length === 0 ? (
+        {filteredCompletedDeliveries.length === 0 ? (
           <div className="p-6 text-center text-sm text-zinc-500">
-            Belum ada riwayat pengantaran COD selesai.
+            {completedDeliveries.length === 0
+              ? 'Belum ada riwayat pengantaran COD selesai.'
+              : 'Tidak ada riwayat pengantaran yang cocok.'}
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -754,7 +898,7 @@ export function CourierTab({
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-100 text-xs">
-                {completedDeliveries.slice(0, 15).map((ord) => (
+                {filteredCompletedDeliveries.slice(0, 15).map((ord) => (
                   <tr key={ord.id} className="hover:bg-zinc-50">
                     <td className="py-3 px-4 font-mono text-zinc-700 tabular-price">
                       {ord.orderNumber}

@@ -1,7 +1,10 @@
 import {Plus, Search, X} from 'lucide-react';
+import {useState} from 'react';
 import {formatRupiah, STORE_CATEGORIES} from '../lib/storeData';
 import type {Product, ProductCategory, ProductVariant} from '../types/store';
 import {ResilientImage} from './ResilientImage';
+
+type CatalogSortMode = 'DEFAULT' | 'PRICE_ASC' | 'PRICE_DESC' | 'STOCK_DESC';
 
 interface ProductCatalogProps {
   products: Product[];
@@ -24,18 +27,34 @@ export function ProductCatalog({
   onSelectProduct,
   onQuickAdd,
 }: ProductCatalogProps) {
+  const [sortBy, setSortBy] = useState<CatalogSortMode>('DEFAULT');
+  const [inStockOnly, setInStockOnly] = useState(false);
+
   const normalizedQuery = searchQuery.trim().toLowerCase();
 
-  const filteredProducts = products.filter((product) => {
-    const matchesCategory =
-      selectedCategory === 'Semua' || product.category === selectedCategory;
-    const matchesSearch =
-      normalizedQuery === '' ||
-      product.name.toLowerCase().includes(normalizedQuery) ||
-      product.category.toLowerCase().includes(normalizedQuery) ||
-      product.description.toLowerCase().includes(normalizedQuery);
-    return matchesCategory && matchesSearch;
-  });
+  const filteredProducts = products
+    .filter((product) => {
+      const matchesCategory =
+        selectedCategory === 'Semua' || product.category === selectedCategory;
+      const matchesSearch =
+        normalizedQuery === '' ||
+        product.name.toLowerCase().includes(normalizedQuery) ||
+        product.category.toLowerCase().includes(normalizedQuery) ||
+        product.description.toLowerCase().includes(normalizedQuery);
+      const hasAvailableStock = product.variants.some((v) => v.stock > 0);
+      return matchesCategory && matchesSearch && (!inStockOnly || hasAvailableStock);
+    })
+    .slice()
+    .sort((a, b) => {
+      if (sortBy === 'DEFAULT') return 0;
+      const aVar = a.variants.find((v) => v.stock > 0) ?? a.variants[0];
+      const bVar = b.variants.find((v) => v.stock > 0) ?? b.variants[0];
+      if (sortBy === 'PRICE_ASC') return (aVar?.price || 0) - (bVar?.price || 0);
+      if (sortBy === 'PRICE_DESC') return (bVar?.price || 0) - (aVar?.price || 0);
+      const aStock = a.variants.reduce((s, v) => s + v.stock, 0);
+      const bStock = b.variants.reduce((s, v) => s + v.stock, 0);
+      return bStock - aStock;
+    });
 
   return (
     <section id="katalog" className="py-12 lg:py-16 bg-[#FAFAFA]">
@@ -76,31 +95,59 @@ export function ProductCatalog({
           </div>
         </div>
 
-        {/* Category segmented controls */}
-        <div
-          role="tablist"
-          aria-label="Filter kategori produk"
-          className="mt-6 flex items-center gap-1.5 overflow-x-auto pb-2"
-        >
-          {STORE_CATEGORIES.map((category) => {
-            const active = selectedCategory === category;
-            return (
-              <button
-                key={category}
-                role="tab"
-                aria-selected={active}
-                type="button"
-                onClick={() => onSelectCategory(category)}
-                className={`px-3.5 py-2 min-h-[40px] rounded-lg text-sm font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#14532D] ${
-                  active
-                    ? 'bg-[#14532D] text-white'
-                    : 'bg-white border border-zinc-200 text-zinc-700 hover:bg-zinc-100 hover:text-zinc-900'
-                }`}
-              >
-                {category}
-              </button>
-            );
-          })}
+        {/* Category segmented controls + Sort & Stock Filter */}
+        <div className="mt-6 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+          <div
+            role="tablist"
+            aria-label="Filter kategori produk"
+            className="flex items-center gap-1.5 overflow-x-auto pb-1"
+          >
+            {STORE_CATEGORIES.map((category) => {
+              const active = selectedCategory === category;
+              return (
+                <button
+                  key={category}
+                  role="tab"
+                  aria-selected={active}
+                  type="button"
+                  onClick={() => onSelectCategory(category)}
+                  className={`px-3.5 py-2 min-h-[40px] rounded-lg text-sm font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#14532D] ${
+                    active
+                      ? 'bg-[#14532D] text-white'
+                      : 'bg-white border border-zinc-200 text-zinc-700 hover:bg-zinc-100 hover:text-zinc-900'
+                  }`}
+                >
+                  {category}
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => setInStockOnly((v) => !v)}
+              className={`px-3 py-2 min-h-[38px] rounded-lg border text-xs font-medium transition-colors cursor-pointer whitespace-nowrap ${
+                inStockOnly
+                  ? 'bg-[#14532D] text-white border-[#14532D]'
+                  : 'bg-white border-zinc-200 text-zinc-700 hover:bg-zinc-50'
+              }`}
+            >
+              Stok Tersedia Saja
+            </button>
+
+            <select
+              aria-label="Urutkan produk"
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value as CatalogSortMode)}
+              className="px-3 py-2 min-h-[38px] text-xs font-medium bg-white border border-zinc-200 rounded-lg text-zinc-700"
+            >
+              <option value="DEFAULT">Urutan: Standar Toko</option>
+              <option value="PRICE_ASC">Harga: Termurah</option>
+              <option value="PRICE_DESC">Harga: Termahal</option>
+              <option value="STOCK_DESC">Stok: Terbanyak</option>
+            </select>
+          </div>
         </div>
 
         {/* Product Grid */}
@@ -175,6 +222,14 @@ export function ProductCatalog({
                               ? 'Stok Habis'
                               : `Sisa ${defaultVariant.stock} unit`}
                           </span>
+                          {product.variants.length > 1 && (
+                            <>
+                              <span aria-hidden="true">·</span>
+                              <span className="text-[#14532D] font-medium">
+                                {product.variants.length} kemasan
+                              </span>
+                            </>
+                          )}
                         </div>
 
                         <h3 className="mt-1.5 text-base font-semibold text-zinc-900 group-hover:text-[#14532D] transition-colors">

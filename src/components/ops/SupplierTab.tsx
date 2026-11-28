@@ -1,4 +1,4 @@
-import {Camera, CheckCircle2, Edit3, PackagePlus, Plus, Trash2, Truck, X} from 'lucide-react';
+import {Camera, CheckCircle2, Copy, Edit3, PackagePlus, Plus, Printer, Trash2, Truck, X} from 'lucide-react';
 import {type ChangeEvent, FormEvent, useEffect, useState} from 'react';
 import {apiFetch} from '../../lib/apiClient';
 import {compressImageFileToDataUrl} from '../../lib/imageHelpers';
@@ -77,6 +77,12 @@ export function SupplierTab({
   const [confirmCancelId, setConfirmCancelId] = useState<string | null>(null);
   const [tableError, setTableError] = useState('');
 
+  // Delivery log filters
+  const [deliveryStatusFilter, setDeliveryStatusFilter] = useState<
+    'ALL' | 'PENDING' | 'RECEIVED' | 'TEMPO'
+  >('ALL');
+  const [deliverySearch, setDeliverySearch] = useState('');
+
   useEffect(() => {
     if (defaultKey) {
       setBatchItems((prev) =>
@@ -119,6 +125,35 @@ export function SupplierTab({
 
   const handleRemoveBatchRow = (rowId: string) => {
     setBatchItems((prev) => (prev.length <= 1 ? prev : prev.filter((r) => r.rowId !== rowId)));
+  };
+
+  const handleDuplicateDeliveryToForm = (d: SupplierDelivery) => {
+    const key = `${d.productId}__${d.variantId}`;
+    setBatchItems((prev) => {
+      if (prev.length === 1 && prev[0].unitCost === '' && prev[0].quantity === '10') {
+        return [
+          {
+            rowId: prev[0].rowId,
+            key,
+            quantity: String(d.quantity),
+            unitCost: d.unitCost > 0 ? String(d.unitCost) : '',
+          },
+        ];
+      }
+      return [
+        ...prev,
+        {
+          rowId: `row-${Date.now()}-${prev.length + 1}`,
+          key,
+          quantity: String(d.quantity),
+          unitCost: d.unitCost > 0 ? String(d.unitCost) : '',
+        },
+      ];
+    });
+    setFormSuccess(
+      `${d.productName} (${d.variantLabel}) x${d.quantity} disalin ke form surat jalan.`
+    );
+    setFormError('');
   };
 
   const handleUploadInvoicePhoto = async (e: ChangeEvent<HTMLInputElement>) => {
@@ -290,9 +325,52 @@ export function SupplierTab({
   const pendingDeliveries = supplierDeliveries.filter(
     (d) => d.status === 'MENUNGGU_TERIMA'
   );
+  const receivedDeliveries = supplierDeliveries.filter((d) => d.status === 'DITERIMA');
+  const totalTempoPayable = supplierDeliveries
+    .filter((d) => d.paymentStatus === 'TEMPO' && d.unitCost > 0)
+    .reduce((sum, d) => sum + d.unitCost * d.quantity, 0);
+
+  const delivSearchNorm = deliverySearch.trim().toLowerCase();
+  const filteredDeliveries = supplierDeliveries.filter((d) => {
+    if (deliveryStatusFilter === 'PENDING' && d.status !== 'MENUNGGU_TERIMA') return false;
+    if (deliveryStatusFilter === 'RECEIVED' && d.status !== 'DITERIMA') return false;
+    if (deliveryStatusFilter === 'TEMPO' && d.paymentStatus !== 'TEMPO') return false;
+    if (
+      delivSearchNorm &&
+      !d.productName.toLowerCase().includes(delivSearchNorm) &&
+      !d.supplierName.toLowerCase().includes(delivSearchNorm) &&
+      !(d.batchCode || '').toLowerCase().includes(delivSearchNorm) &&
+      !d.note.toLowerCase().includes(delivSearchNorm)
+    ) {
+      return false;
+    }
+    return true;
+  });
 
   return (
     <div className="space-y-8">
+      {/* Ringkasan Status Suplai */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 print:hidden">
+        <div className="bg-white border border-zinc-200 rounded-xl p-4">
+          <p className="text-xs text-zinc-500">Menunggu Verifikasi Gudang</p>
+          <p className="text-xl font-bold text-amber-700 tabular-price mt-1">
+            {pendingDeliveries.length}
+          </p>
+        </div>
+        <div className="bg-white border border-zinc-200 rounded-xl p-4">
+          <p className="text-xs text-zinc-500">Sudah Diterima Gudang</p>
+          <p className="text-xl font-bold text-[#14532D] tabular-price mt-1">
+            {receivedDeliveries.length}
+          </p>
+        </div>
+        <div className="bg-white border border-zinc-200 rounded-xl p-4">
+          <p className="text-xs text-zinc-500">Total Tagihan Tempo Aktif</p>
+          <p className="text-xl font-bold text-zinc-900 tabular-price mt-1">
+            {formatRupiah(totalTempoPayable)}
+          </p>
+        </div>
+      </div>
+
       {/* Low stock restock needs (no costPrice or customer info exposed) */}
       <div className="bg-white border border-zinc-200 rounded-xl overflow-hidden">
         <div className="px-6 py-4 border-b border-zinc-200 flex flex-wrap items-center justify-between gap-3">
@@ -744,12 +822,67 @@ export function SupplierTab({
 
       {/* Delivery Log Table */}
       <div className="bg-white border border-zinc-200 rounded-xl overflow-hidden">
-        <div className="px-6 py-4 border-b border-zinc-200">
-          <h3 className="text-base font-semibold text-zinc-900">
-            {isSupplier
-              ? 'Riwayat Pengiriman Suplai Saya'
-              : 'Daftar Kiriman Masuk dari Pemasok'}
-          </h3>
+        <div className="px-6 py-4 border-b border-zinc-200 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="text-base font-semibold text-zinc-900">
+                {isSupplier
+                  ? 'Riwayat Pengiriman Suplai Saya'
+                  : 'Daftar Kiriman Masuk dari Pemasok'}
+              </h3>
+              <p className="text-xs text-zinc-500 tabular-price mt-0.5">
+                Menampilkan {filteredDeliveries.length} dari {supplierDeliveries.length} kiriman
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 print:hidden">
+              <input
+                type="search"
+                value={deliverySearch}
+                onChange={(e) => setDeliverySearch(e.target.value)}
+                placeholder="Cari barang, pemasok, surat jalan..."
+                aria-label="Cari daftar kiriman suplai"
+                className="px-3 py-1.5 text-xs border border-zinc-300 rounded-lg w-52"
+              />
+              <button
+                type="button"
+                onClick={() => window.print()}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-zinc-300 bg-white text-xs font-semibold text-zinc-800 hover:bg-zinc-50 cursor-pointer whitespace-nowrap"
+              >
+                <Printer className="w-3.5 h-3.5 text-zinc-700" aria-hidden="true" />
+                <span>Cetak Ringkasan</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5 print:hidden">
+            {(
+              [
+                {id: 'ALL', label: `Semua (${supplierDeliveries.length})`},
+                {id: 'PENDING', label: `Menunggu Gudang (${pendingDeliveries.length})`},
+                {id: 'RECEIVED', label: `Diterima (${receivedDeliveries.length})`},
+                {
+                  id: 'TEMPO',
+                  label: `Tempo Belum Lunas (${
+                    supplierDeliveries.filter((d) => d.paymentStatus === 'TEMPO').length
+                  })`,
+                },
+              ] as {id: 'ALL' | 'PENDING' | 'RECEIVED' | 'TEMPO'; label: string}[]
+            ).map((chip) => (
+              <button
+                key={chip.id}
+                type="button"
+                onClick={() => setDeliveryStatusFilter(chip.id)}
+                className={`px-2.5 py-1 rounded-md text-xs font-medium cursor-pointer whitespace-nowrap ${
+                  deliveryStatusFilter === chip.id
+                    ? 'bg-[#14532D] text-white'
+                    : 'border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50'
+                }`}
+              >
+                {chip.label}
+              </button>
+            ))}
+          </div>
+
           {tableError && (
             <p className="mt-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-2.5">
               {tableError}
@@ -757,9 +890,11 @@ export function SupplierTab({
           )}
         </div>
 
-        {supplierDeliveries.length === 0 ? (
+        {filteredDeliveries.length === 0 ? (
           <div className="p-8 text-center text-sm text-zinc-500">
-            Belum ada catatan kiriman suplai barang.
+            {supplierDeliveries.length === 0
+              ? 'Belum ada catatan kiriman suplai barang.'
+              : 'Tidak ada kiriman suplai pada filter ini.'}
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -778,7 +913,7 @@ export function SupplierTab({
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-100 text-xs">
-                {supplierDeliveries.map((d) => {
+                {filteredDeliveries.map((d) => {
                   const canManagePending = d.status === 'MENUNGGU_TERIMA' && canSubmit;
                   return (
                     <tr key={d.id} className="hover:bg-zinc-50">
@@ -899,6 +1034,17 @@ export function SupplierTab({
                                   </button>
                                 )}
                               </>
+                            )}
+                            {canSubmit && (
+                              <button
+                                type="button"
+                                onClick={() => handleDuplicateDeliveryToForm(d)}
+                                title="Duplikat ke form surat jalan"
+                                className="inline-flex items-center gap-1 px-2 py-1.5 rounded border border-zinc-300 bg-white text-[11px] font-medium text-zinc-700 hover:bg-zinc-50 cursor-pointer whitespace-nowrap print:hidden"
+                              >
+                                <Copy className="w-3 h-3" aria-hidden="true" />
+                                <span>Duplikat</span>
+                              </button>
                             )}
                             {d.status === 'DITERIMA' && (
                               <span className="text-zinc-400">Masuk stok</span>

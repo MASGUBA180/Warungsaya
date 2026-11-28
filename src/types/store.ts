@@ -295,5 +295,6 @@ export interface CustomerProfile {
   name: string;
   phone: string;
   defaultAddress: string;
+  savedCoords?: GeoPoint | null;
   createdAt: string;
 }

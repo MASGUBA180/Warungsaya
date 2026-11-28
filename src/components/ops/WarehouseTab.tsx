@@ -1,4 +1,4 @@
-import {AlertTriangle, Camera, Edit3, Plus, Search, Trash2, X} from 'lucide-react';
+import {AlertTriangle, Camera, Download, Edit3, Plus, Search, Trash2, X} from 'lucide-react';
 import {ChangeEvent, FormEvent, useState} from 'react';
 import {apiFetch} from '../../lib/apiClient';
 import {compressImageFileToDataUrl} from '../../lib/imageHelpers';
@@ -107,6 +107,13 @@ export function WarehouseTab({
   const [recordExpense, setRecordExpense] = useState(true);
   const [savingStock, setSavingStock] = useState(false);
 
+  // Stock movement filtering & export state
+  const [movementTypeFilter, setMovementTypeFilter] = useState<
+    'ALL' | 'MASUK' | 'KELUAR' | 'OPNAME' | 'RETUR' | 'RUSAK'
+  >('ALL');
+  const [movementSearch, setMovementSearch] = useState('');
+  const [showAllMovements, setShowAllMovements] = useState(false);
+
   const flatVariants = products.flatMap((p) =>
     p.variants.map((v) => ({
       product: p,
@@ -114,6 +121,16 @@ export function WarehouseTab({
       isLow: v.stock <= v.minStock,
       isExpiring: isExpiringSoon(v.expiryDate),
     }))
+  );
+
+  const totalUnitsStock = flatVariants.reduce((sum, r) => sum + r.variant.stock, 0);
+  const totalCapitalValuation = flatVariants.reduce(
+    (sum, r) => sum + r.variant.stock * (r.variant.costPrice ?? Math.round(r.variant.price * 0.85)),
+    0
+  );
+  const totalRetailValuation = flatVariants.reduce(
+    (sum, r) => sum + r.variant.stock * r.variant.price,
+    0
   );
 
   const expiringCount = flatVariants.filter((r) => r.isExpiring).length;
@@ -132,6 +149,47 @@ export function WarehouseTab({
     }
     return true;
   });
+
+  const movSearchNorm = movementSearch.trim().toLowerCase();
+  const filteredMovements = stockMovements.filter((m) => {
+    if (movementTypeFilter !== 'ALL' && m.type !== movementTypeFilter) return false;
+    if (
+      movSearchNorm &&
+      !m.productName.toLowerCase().includes(movSearchNorm) &&
+      !m.variantLabel.toLowerCase().includes(movSearchNorm) &&
+      !m.note.toLowerCase().includes(movSearchNorm) &&
+      !m.actorName.toLowerCase().includes(movSearchNorm)
+    ) {
+      return false;
+    }
+    return true;
+  });
+
+  const handleExportMovementsCsv = () => {
+    const header = ['Waktu', 'Jenis', 'Produk', 'Kemasan', 'Perubahan', 'Keterangan', 'Petugas'];
+    const rows = filteredMovements.map((m) => [
+      m.createdAt,
+      m.type,
+      m.productName.replace(/"/g, '""'),
+      m.variantLabel.replace(/"/g, '""'),
+      String(m.quantityDelta),
+      m.note.replace(/"/g, '""'),
+      m.actorName.replace(/"/g, '""'),
+    ]);
+    const csvContent = [
+      header.join(','),
+      ...rows.map((r) => r.map((cell) => `"${cell}"`).join(',')),
+    ].join('\n');
+    const blob = new Blob([csvContent], {type: 'text/csv;charset=utf-8;'});
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `pergerakan-stok-gudang-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
 
   const handleImageUpload = async (
     e: ChangeEvent<HTMLInputElement>,
@@ -384,6 +442,34 @@ export function WarehouseTab({
 
   return (
     <div className="space-y-8">
+      {/* Ringkasan Valuasi Inventaris */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="bg-white border border-zinc-200 rounded-xl p-4">
+          <p className="text-xs text-zinc-500">Total Varian Aktif</p>
+          <p className="text-xl font-bold text-zinc-900 tabular-price mt-1">
+            {flatVariants.length}
+          </p>
+        </div>
+        <div className="bg-white border border-zinc-200 rounded-xl p-4">
+          <p className="text-xs text-zinc-500">Total Unit Stok</p>
+          <p className="text-xl font-bold text-zinc-900 tabular-price mt-1">
+            {totalUnitsStock.toLocaleString('id-ID')}
+          </p>
+        </div>
+        <div className="bg-white border border-zinc-200 rounded-xl p-4">
+          <p className="text-xs text-zinc-500">Estimasi Nilai Modal Gudang</p>
+          <p className="text-xl font-bold text-zinc-900 tabular-price mt-1">
+            {formatRupiah(totalCapitalValuation)}
+          </p>
+        </div>
+        <div className="bg-white border border-zinc-200 rounded-xl p-4">
+          <p className="text-xs text-zinc-500">Estimasi Nilai Jual</p>
+          <p className="text-xl font-bold text-[#14532D] tabular-price mt-1">
+            {formatRupiah(totalRetailValuation)}
+          </p>
+        </div>
+      </div>
+
       {pendingSupplierCount > 0 && (
         <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex flex-wrap items-center justify-between gap-3">
           <p className="text-xs text-amber-950">
@@ -1346,8 +1432,52 @@ export function WarehouseTab({
 
       {/* Stock Movement Log */}
       <div className="bg-white border border-zinc-200 rounded-xl overflow-hidden">
-        <div className="px-6 py-4 border-b border-zinc-200">
-          <h3 className="text-base font-semibold text-zinc-900">Riwayat Pergerakan Stok</h3>
+        <div className="px-6 py-4 border-b border-zinc-200 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="text-base font-semibold text-zinc-900">Riwayat Pergerakan Stok</h3>
+            <p className="text-xs text-zinc-500 tabular-price mt-0.5">
+              Menampilkan{' '}
+              {showAllMovements
+                ? filteredMovements.length
+                : Math.min(15, filteredMovements.length)}{' '}
+              dari {filteredMovements.length} catatan mutasi
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              type="search"
+              value={movementSearch}
+              onChange={(e) => setMovementSearch(e.target.value)}
+              placeholder="Cari barang / catatan..."
+              aria-label="Cari pergerakan stok"
+              className="px-3 py-1.5 text-xs border border-zinc-300 rounded-lg w-44"
+            />
+            <select
+              aria-label="Filter jenis mutasi stok"
+              value={movementTypeFilter}
+              onChange={(e) =>
+                setMovementTypeFilter(
+                  e.target.value as 'ALL' | 'MASUK' | 'KELUAR' | 'OPNAME' | 'RETUR' | 'RUSAK'
+                )
+              }
+              className="px-2.5 py-1.5 text-xs bg-white border border-zinc-300 rounded-lg"
+            >
+              <option value="ALL">Semua Jenis</option>
+              <option value="MASUK">MASUK</option>
+              <option value="KELUAR">KELUAR</option>
+              <option value="OPNAME">OPNAME</option>
+              <option value="RETUR">RETUR</option>
+              <option value="RUSAK">RUSAK</option>
+            </select>
+            <button
+              type="button"
+              onClick={handleExportMovementsCsv}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-zinc-300 bg-white text-xs font-semibold text-zinc-800 hover:bg-zinc-50 cursor-pointer whitespace-nowrap"
+            >
+              <Download className="w-3.5 h-3.5 text-[#14532D]" aria-hidden="true" />
+              <span>Unduh CSV</span>
+            </button>
+          </div>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse text-sm">
@@ -1361,7 +1491,7 @@ export function WarehouseTab({
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-100">
-              {stockMovements.slice(0, 15).map((m) => (
+              {(showAllMovements ? filteredMovements : filteredMovements.slice(0, 15)).map((m) => (
                 <tr key={m.id} className="hover:bg-zinc-50 text-xs">
                   <td className="py-2.5 px-4 text-zinc-500 whitespace-nowrap">
                     {formatShortDate(m.createdAt)}
@@ -1403,6 +1533,19 @@ export function WarehouseTab({
             </tbody>
           </table>
         </div>
+        {filteredMovements.length > 15 && (
+          <div className="px-6 py-3 border-t border-zinc-100 bg-zinc-50 text-center">
+            <button
+              type="button"
+              onClick={() => setShowAllMovements((v) => !v)}
+              className="text-xs font-semibold text-[#14532D] hover:underline cursor-pointer"
+            >
+              {showAllMovements
+                ? 'Ringkas (15 Teratas)'
+                : `Lihat Semua (${filteredMovements.length})`}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

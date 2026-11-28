@@ -6,6 +6,7 @@ import type {
   CashierShift,
   ComplaintRecord,
   DivisionRole,
+  GeoPoint,
   KasbonRecord,
   LedgerEntry,
   Order,
@@ -30,6 +31,7 @@ export interface StoredCustomer {
   name: string;
   phone: string;
   defaultAddress: string;
+  savedCoords?: GeoPoint | null;
   passcodeHash: string;
   createdAt: string;
 }

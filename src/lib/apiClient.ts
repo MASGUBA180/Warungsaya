@@ -49,6 +49,7 @@ interface LocalCustomerRecord {
   name: string;
   phone: string;
   defaultAddress: string;
+  savedCoords?: GeoPoint | null;
   passcodeHash: string;
   createdAt: string;
 }
@@ -697,6 +698,7 @@ async function handleStaticFallback(
       name: rec.name,
       phone: rec.phone,
       defaultAddress: rec.defaultAddress,
+      savedCoords: rec.savedCoords ?? null,
       createdAt: rec.createdAt,
     };
     return {ok: true, status: 201, storageMode: 'browser', data: {customerToken, customer: profile}};
@@ -721,6 +723,7 @@ async function handleStaticFallback(
       name: rec.name,
       phone: rec.phone,
       defaultAddress: rec.defaultAddress,
+      savedCoords: rec.savedCoords ?? null,
       createdAt: rec.createdAt,
     };
     return {ok: true, status: 200, storageMode: 'browser', data: {customerToken, customer: profile}};
@@ -737,6 +740,7 @@ async function handleStaticFallback(
       name: cust.name,
       phone: cust.phone,
       defaultAddress: cust.defaultAddress,
+      savedCoords: cust.savedCoords ?? null,
       createdAt: cust.createdAt,
     };
     const orders = db.orders
@@ -764,6 +768,12 @@ async function handleStaticFallback(
     if (String(body.defaultAddress || '').trim().length >= 4) {
       cust.defaultAddress = String(body.defaultAddress).trim();
     }
+    if (body.savedCoords === null) {
+      cust.savedCoords = null;
+    } else if (body.savedCoords !== undefined) {
+      const parsed = parseLocalGeoPoint(body.savedCoords);
+      if (parsed) cust.savedCoords = parsed;
+    }
     writeLocalDb(db);
     return {
       ok: true,
@@ -775,6 +785,7 @@ async function handleStaticFallback(
           name: cust.name,
           phone: cust.phone,
           defaultAddress: cust.defaultAddress,
+          savedCoords: cust.savedCoords ?? null,
           createdAt: cust.createdAt,
         },
       },
@@ -1238,19 +1249,57 @@ async function handleStaticFallback(
     };
   }
 
+  if (path === '/api/ops/me/password' && method === 'PATCH') {
+    const currentPasscode = String(body.currentPasscode || '');
+    const newPasscode = String(body.newPasscode || '');
+    if (newPasscode.length < 6) {
+      return {ok: false, status: 400, storageMode: 'browser', data: {error: 'Kata sandi baru minimal 6 karakter.'}};
+    }
+    const staffMember = db.staff.find((s) => s.id === user.id && s.active);
+    if (!staffMember) {
+      return {ok: false, status: 404, storageMode: 'browser', data: {error: 'Akun staf tidak ditemukan.'}};
+    }
+    if (!(await verifyLocalPasscode(currentPasscode, staffMember.passcodeHash))) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Kata sandi saat ini tidak cocok.'}};
+    }
+    staffMember.passcodeHash = await hashLocalPasscode(newPasscode);
+    recordLocalAuditLog(
+      db,
+      user,
+      'GANTI_SANDI_SENDIRI',
+      staffMember.username,
+      'Staf memperbarui kata sandi akun sendiri'
+    );
+    writeLocalDb(db);
+    return {ok: true, status: 200, storageMode: 'browser', data: {updated: true}};
+  }
+
   if (path === '/api/ops/settings' && method === 'PATCH') {
     if (!isLeadership) {
       return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Khusus Pemilik / Direktur.'}};
     }
     const parsedCoords = parseLocalGeoPoint(body.storeCoords);
     const isOwner = user.role === 'PEMILIK';
+    const nextName = String(body.name ?? db.settings.name).trim();
+    const rawMapsUrl = String(body.mapsUrl ?? db.settings.mapsUrl).trim();
+    const safeMapsUrl = /^https?:\/\//i.test(rawMapsUrl) ? rawMapsUrl : db.settings.mapsUrl;
+    const deliveryFee = Math.max(0, Number(body.deliveryFee ?? db.settings.deliveryFee));
+    const freeDeliveryMin = Math.max(0, Number(body.freeDeliveryMin ?? db.settings.freeDeliveryMin));
+
     db.settings = {
       ...db.settings,
+      name: nextName.length >= 2 ? nextName : db.settings.name,
+      tagline: String(body.tagline ?? db.settings.tagline).trim() || db.settings.tagline,
+      streetAddress: String(body.streetAddress ?? db.settings.streetAddress).trim() || db.settings.streetAddress,
+      district: String(body.district ?? db.settings.district).trim() || db.settings.district,
+      province: String(body.province ?? db.settings.province).trim() || db.settings.province,
+      fullAddress: String(body.fullAddress ?? db.settings.fullAddress).trim() || db.settings.fullAddress,
+      mapsUrl: safeMapsUrl,
       hours: String(body.hours || db.settings.hours).trim(),
       daysOpen: String(body.daysOpen || db.settings.daysOpen).trim(),
       deliveryArea: String(body.deliveryArea || db.settings.deliveryArea).trim(),
-      deliveryFee: Math.max(0, Number(body.deliveryFee ?? db.settings.deliveryFee)),
-      freeDeliveryMin: Math.max(0, Number(body.freeDeliveryMin ?? db.settings.freeDeliveryMin)),
+      deliveryFee: Number.isFinite(deliveryFee) ? deliveryFee : db.settings.deliveryFee,
+      freeDeliveryMin: Number.isFinite(freeDeliveryMin) ? freeDeliveryMin : db.settings.freeDeliveryMin,
       whatsappNumber: String(body.whatsappNumber ?? db.settings.whatsappNumber ?? '6281279008899').trim(),
       qrisMerchantName: isOwner
         ? String(body.qrisMerchantName ?? db.settings.qrisMerchantName ?? 'TOKO DIMAS JAYA').trim()
@@ -1261,7 +1310,7 @@ async function handleStaticFallback(
       storeCoords:
         body.storeCoords === null ? null : parsedCoords ?? db.settings.storeCoords ?? null,
     };
-    recordLocalAuditLog(db, user, 'UBAH_PENGATURAN', 'StoreSettings', 'Perbarui pengaturan toko');
+    recordLocalAuditLog(db, user, 'UBAH_PENGATURAN', 'StoreSettings', 'Perbarui profil / jam buka / ongkir / koordinat / WA toko');
     writeLocalDb(db);
     return {ok: true, status: 200, storageMode: 'browser', data: {settings: db.settings}};
   }
@@ -1488,6 +1537,8 @@ async function handleStaticFallback(
     db.orders.unshift(posOrder);
 
     if (paymentMethod === 'KASBON') {
+      const rawDue = String(body.kasbonDueDate || '').trim();
+      const dueDate = /^\d{4}-\d{2}-\d{2}$/.test(rawDue) ? rawDue : undefined;
       db.kasbon.unshift({
         id: randomId('ksb'),
         customerName,
@@ -1495,6 +1546,7 @@ async function handleStaticFallback(
         address: notes || 'Warga Gunung Batin Udik',
         amountDue: total,
         totalPaid: 0,
+        dueDate,
         note: `Bon Kasir #${orderNumber}`,
         updatedAt: now,
       });
@@ -2170,6 +2222,27 @@ async function handleStaticFallback(
     db.ledger.unshift(entry);
     writeLocalDb(db);
     return {ok: true, status: 201, storageMode: 'browser', data: {entry}};
+  }
+
+  if (path.startsWith('/api/ops/ledger/') && path.split('/').length === 5 && method === 'DELETE') {
+    if (!['PEMILIK', 'DIREKTUR', 'KEUANGAN'].includes(user.role)) {
+      return {ok: false, status: 403, storageMode: 'browser', data: {error: 'Khusus Keuangan / Pimpinan.'}};
+    }
+    const id = path.split('/')[4];
+    const idx = db.ledger.findIndex((l) => l.id === id);
+    if (idx === -1) {
+      return {ok: false, status: 404, storageMode: 'browser', data: {error: 'Catatan kas tidak ditemukan.'}};
+    }
+    const [removed] = db.ledger.splice(idx, 1);
+    recordLocalAuditLog(
+      db,
+      user,
+      'HAPUS_KAS',
+      removed.category,
+      `Hapus catatan ${removed.type} Rp ${removed.amount.toLocaleString('id-ID')}: ${removed.description}`
+    );
+    writeLocalDb(db);
+    return {ok: true, status: 200, storageMode: 'browser', data: {deletedId: removed.id}};
   }
 
   if (path === '/api/ops/kasbon' && method === 'POST') {

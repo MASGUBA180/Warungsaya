@@ -1,4 +1,4 @@
-import {ArrowLeft, Eye, EyeOff, LogOut, RefreshCw} from 'lucide-react';
+import {ArrowLeft, Eye, EyeOff, KeyRound, LogOut, RefreshCw, X} from 'lucide-react';
 import {FormEvent, useCallback, useEffect, useState} from 'react';
 import {apiFetch} from '../../lib/apiClient';
 import {
@@ -136,6 +136,16 @@ export function StaffPortal({
   const [staff, setStaff] = useState<PublicStaffProfile[]>([]);
   const [couriers, setCouriers] = useState<PublicStaffProfile[]>([]);
   const [settings, setSettings] = useState<StoreSettings | null>(null);
+
+  // Self-service password change modal state
+  const [showChangePassModal, setShowChangePassModal] = useState(false);
+  const [currentPassInput, setCurrentPassInput] = useState('');
+  const [newPassInput, setNewPassInput] = useState('');
+  const [showCurrentPassInput, setShowCurrentPassInput] = useState(false);
+  const [showNewPassInput, setShowNewPassInput] = useState(false);
+  const [passChangeError, setPassChangeError] = useState('');
+  const [passChangeSuccess, setPassChangeSuccess] = useState('');
+  const [savingPassChange, setSavingPassChange] = useState(false);
 
   useEffect(() => {
     apiFetch<{ownerClaimed: boolean; envPasscodeActive: boolean}>('/api/auth/status')
@@ -315,6 +325,46 @@ export function StaffPortal({
     setUser(null);
     setOverview(null);
     setAuthTab(authStatus?.ownerClaimed ? 'login' : 'claim');
+  };
+
+  const handleOpenChangePass = () => {
+    setShowChangePassModal(true);
+    setCurrentPassInput('');
+    setNewPassInput('');
+    setPassChangeError('');
+    setPassChangeSuccess('');
+  };
+
+  const handleSubmitChangePass = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!authToken) return;
+    setPassChangeError('');
+    setPassChangeSuccess('');
+    setSavingPassChange(true);
+    try {
+      const res = await apiFetch<{updated?: boolean; error?: string}>('/api/ops/me/password', {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({
+          currentPasscode: currentPassInput,
+          newPasscode: newPassInput,
+        }),
+      });
+      if (!res.ok) {
+        setPassChangeError(res.data.error || 'Gagal mengganti kata sandi.');
+        return;
+      }
+      setPassChangeSuccess('Kata sandi akun Anda berhasil diperbarui.');
+      setCurrentPassInput('');
+      setNewPassInput('');
+    } catch {
+      setPassChangeError('Gagal menghubungi server Toko Dimas Jaya.');
+    } finally {
+      setSavingPassChange(false);
+    }
   };
 
   // Unauthenticated view: Wait for authStatus, then show Buat ID & Sandi Pemilik or Login
@@ -590,12 +640,20 @@ export function StaffPortal({
           </nav>
         </div>
 
-        <div className="hidden lg:block p-4 border-t border-zinc-200 space-y-3">
+        <div className="hidden lg:block p-4 border-t border-zinc-200 space-y-2.5">
           <div className="text-xs">
             <p className="font-semibold text-zinc-900 truncate">{user.displayName}</p>
             <p className="text-zinc-700 mt-0.5">{ROLE_LABELS[user.role]}</p>
             <p className="text-[11px] text-zinc-500 mt-0.5">{ROLE_HIERARCHY_LEVEL[user.role]}</p>
           </div>
+          <button
+            type="button"
+            onClick={handleOpenChangePass}
+            className="w-full inline-flex items-center justify-center gap-2 py-2 px-3 min-h-[36px] rounded-lg border border-zinc-200 bg-zinc-50 text-xs font-medium text-zinc-800 hover:bg-zinc-100 cursor-pointer"
+          >
+            <KeyRound className="w-3.5 h-3.5 text-[#14532D]" aria-hidden="true" />
+            <span>Ganti Sandi</span>
+          </button>
           <button
             type="button"
             onClick={handleLogout}
@@ -641,6 +699,15 @@ export function StaffPortal({
             >
               <ArrowLeft className="w-3.5 h-3.5" aria-hidden="true" />
               <span>Etalase Toko</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleOpenChangePass}
+              aria-label="Ganti sandi"
+              className="lg:hidden p-2 min-h-[38px] rounded-lg border border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50 cursor-pointer"
+            >
+              <KeyRound className="w-4 h-4 text-[#14532D]" />
             </button>
 
             <button
@@ -702,6 +769,7 @@ export function StaffPortal({
                   orders={orders}
                   shifts={shifts}
                   couriers={couriers}
+                  kasbon={kasbon}
                   authToken={authToken}
                   onRefresh={() => loadOperationalData(authToken)}
                 />
@@ -758,6 +826,7 @@ export function StaffPortal({
                   role={user.role}
                   complaints={complaints}
                   products={products}
+                  orders={orders}
                   authToken={authToken}
                   onRefresh={() => loadOperationalData(authToken)}
                 />
@@ -766,6 +835,137 @@ export function StaffPortal({
           )}
         </main>
       </div>
+
+      {showChangePassModal && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Ganti kata sandi akun"
+          className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
+        >
+          <div className="bg-white border border-zinc-200 rounded-xl max-w-md w-full p-6 space-y-4 shadow-xl">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-base font-bold text-zinc-900">Ganti Kata Sandi Akun</h2>
+                <p className="text-xs text-zinc-500 mt-0.5">
+                  {user.displayName} ({ROLE_LABELS[user.role]})
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowChangePassModal(false)}
+                aria-label="Tutup"
+                className="p-1.5 rounded-lg text-zinc-500 hover:bg-zinc-100 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {user.id === 'env-owner' ? (
+              <div className="space-y-3 text-xs text-zinc-700">
+                <p className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-amber-900">
+                  Anda sedang masuk menggunakan akun darurat <span className="font-mono">OWNER_PASSCODE</span>.
+                  Kata sandi darurat diatur lewat panel Secrets. Untuk mengelola sandi di sini, masuk memakai akun Pemilik terdaftar.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setShowChangePassModal(false)}
+                  className="w-full py-2.5 rounded-lg bg-zinc-900 text-white font-semibold cursor-pointer"
+                >
+                  Tutup
+                </button>
+              </div>
+            ) : (
+              <form onSubmit={handleSubmitChangePass} className="space-y-3.5">
+                <div>
+                  <label htmlFor="me-cur-pass" className="block text-xs text-zinc-600 mb-1">
+                    Kata Sandi Saat Ini
+                  </label>
+                  <div className="relative">
+                    <input
+                      id="me-cur-pass"
+                      type={showCurrentPassInput ? 'text' : 'password'}
+                      required
+                      value={currentPassInput}
+                      onChange={(e) => setCurrentPassInput(e.target.value)}
+                      className="w-full px-3 pr-10 py-2 min-h-[40px] text-sm border border-zinc-300 rounded-lg focus:outline-none focus:border-[#14532D]"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowCurrentPassInput((v) => !v)}
+                      aria-label={showCurrentPassInput ? 'Sembunyikan sandi lama' : 'Lihat sandi lama'}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-zinc-500 cursor-pointer"
+                    >
+                      {showCurrentPassInput ? (
+                        <EyeOff className="w-4 h-4" />
+                      ) : (
+                        <Eye className="w-4 h-4" />
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label htmlFor="me-new-pass" className="block text-xs text-zinc-600 mb-1">
+                    Kata Sandi Baru (Minimal 6 karakter)
+                  </label>
+                  <div className="relative">
+                    <input
+                      id="me-new-pass"
+                      type={showNewPassInput ? 'text' : 'password'}
+                      required
+                      minLength={6}
+                      value={newPassInput}
+                      onChange={(e) => setNewPassInput(e.target.value)}
+                      className="w-full px-3 pr-10 py-2 min-h-[40px] text-sm border border-zinc-300 rounded-lg focus:outline-none focus:border-[#14532D]"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowNewPassInput((v) => !v)}
+                      aria-label={showNewPassInput ? 'Sembunyikan sandi baru' : 'Lihat sandi baru'}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-zinc-500 cursor-pointer"
+                    >
+                      {showNewPassInput ? (
+                        <EyeOff className="w-4 h-4" />
+                      ) : (
+                        <Eye className="w-4 h-4" />
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {passChangeError && (
+                  <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-2.5">
+                    {passChangeError}
+                  </p>
+                )}
+                {passChangeSuccess && (
+                  <p className="text-xs text-[#14532D] bg-emerald-50 border border-emerald-200 rounded-lg p-2.5">
+                    {passChangeSuccess}
+                  </p>
+                )}
+
+                <div className="flex justify-end gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setShowChangePassModal(false)}
+                    className="px-3.5 py-2 rounded-lg border border-zinc-300 bg-white text-xs font-medium text-zinc-700 hover:bg-zinc-50 cursor-pointer"
+                  >
+                    Tutup
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={savingPassChange}
+                    className="px-4 py-2 rounded-lg bg-[#14532D] text-white text-xs font-semibold hover:bg-[#166534] disabled:opacity-60 cursor-pointer"
+                  >
+                    {savingPassChange ? 'Menyimpan...' : 'Simpan Sandi Baru'}
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

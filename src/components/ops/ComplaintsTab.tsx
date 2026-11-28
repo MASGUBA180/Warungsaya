@@ -1,4 +1,4 @@
-import {AlertCircle, CheckCircle2, Image as ImageIcon, RotateCcw, X} from 'lucide-react';
+import {AlertCircle, CheckCircle2, Image as ImageIcon, MessageCircle, RotateCcw, X} from 'lucide-react';
 import {FormEvent, useState} from 'react';
 import {apiFetch} from '../../lib/apiClient';
 import {
@@ -12,6 +12,7 @@ import type {
   ComplaintRecord,
   ComplaintStatus,
   DivisionRole,
+  Order,
   Product,
 } from '../../types/store';
 
@@ -19,19 +20,34 @@ interface ComplaintsTabProps {
   role: DivisionRole;
   complaints: ComplaintRecord[];
   products: Product[];
+  orders?: Order[];
   authToken: string;
   onRefresh: () => Promise<void>;
+}
+
+function buildComplaintWhatsappLink(c: ComplaintRecord): string {
+  const digits = (c.phone || '').replace(/\D+/g, '');
+  if (!digits) return '';
+  const waPhone = digits.startsWith('0')
+    ? `62${digits.slice(1)}`
+    : digits.startsWith('62')
+      ? digits
+      : `62${digits}`;
+  const msg = `Halo ${c.customerName}, kami dari *Toko Dimas Jaya* menindaklanjuti laporan komplain *${c.complaintNumber}* untuk pesanan *#${c.orderNumber}*. `;
+  return `https://wa.me/${waPhone}?text=${encodeURIComponent(msg)}`;
 }
 
 export function ComplaintsTab({
   role,
   complaints,
   products,
+  orders = [],
   authToken,
   onRefresh,
 }: ComplaintsTabProps) {
   const isLeadership = role === 'PEMILIK' || role === 'DIREKTUR';
   const [filterStatus, setFilterStatus] = useState<'ALL' | 'OPEN' | 'DONE'>('ALL');
+  const [searchQuery, setSearchQuery] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [statusDraft, setStatusDraft] = useState<ComplaintStatus>('DIPROSES');
   const [staffResponse, setStaffResponse] = useState('');
@@ -50,10 +66,27 @@ export function ComplaintsTab({
   ).length;
   const newCount = complaints.filter((c) => c.status === 'BARU').length;
 
+  const searchNorm = searchQuery.trim().toLowerCase();
   const filtered = complaints.filter((c) => {
-    if (filterStatus === 'OPEN') return c.status === 'BARU' || c.status === 'DIPROSES';
-    if (filterStatus === 'DONE')
-      return c.status === 'DISETUJUI' || c.status === 'SELESAI' || c.status === 'DITOLAK';
+    if (filterStatus === 'OPEN' && c.status !== 'BARU' && c.status !== 'DIPROSES') return false;
+    if (
+      filterStatus === 'DONE' &&
+      c.status !== 'DISETUJUI' &&
+      c.status !== 'SELESAI' &&
+      c.status !== 'DITOLAK'
+    ) {
+      return false;
+    }
+    if (
+      searchNorm &&
+      !c.complaintNumber.toLowerCase().includes(searchNorm) &&
+      !c.orderNumber.toLowerCase().includes(searchNorm) &&
+      !c.customerName.toLowerCase().includes(searchNorm) &&
+      !c.phone.toLowerCase().includes(searchNorm) &&
+      !c.description.toLowerCase().includes(searchNorm)
+    ) {
+      return false;
+    }
     return true;
   });
 
@@ -150,40 +183,50 @@ export function ComplaintsTab({
           </p>
         </div>
 
-        <div className="flex items-center gap-1.5">
-          <button
-            type="button"
-            onClick={() => setFilterStatus('ALL')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap ${
-              filterStatus === 'ALL'
-                ? 'bg-[#14532D] text-white'
-                : 'border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50'
-            }`}
-          >
-            Semua ({complaints.length})
-          </button>
-          <button
-            type="button"
-            onClick={() => setFilterStatus('OPEN')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap ${
-              filterStatus === 'OPEN'
-                ? 'bg-amber-700 text-white'
-                : 'border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50'
-            }`}
-          >
-            Aktif ({openCount})
-          </button>
-          <button
-            type="button"
-            onClick={() => setFilterStatus('DONE')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap ${
-              filterStatus === 'DONE'
-                ? 'bg-zinc-900 text-white'
-                : 'border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50'
-            }`}
-          >
-            Selesai ({complaints.length - openCount})
-          </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            type="search"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Cari kode komplain, pesanan, nama..."
+            aria-label="Cari komplain pelanggan"
+            className="px-3 py-1.5 text-xs border border-zinc-300 rounded-lg w-56"
+          />
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => setFilterStatus('ALL')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap ${
+                filterStatus === 'ALL'
+                  ? 'bg-[#14532D] text-white'
+                  : 'border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50'
+              }`}
+            >
+              Semua ({complaints.length})
+            </button>
+            <button
+              type="button"
+              onClick={() => setFilterStatus('OPEN')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap ${
+                filterStatus === 'OPEN'
+                  ? 'bg-amber-700 text-white'
+                  : 'border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50'
+              }`}
+            >
+              Aktif ({openCount})
+            </button>
+            <button
+              type="button"
+              onClick={() => setFilterStatus('DONE')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap ${
+                filterStatus === 'DONE'
+                  ? 'bg-zinc-900 text-white'
+                  : 'border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50'
+              }`}
+            >
+              Selesai ({complaints.length - openCount})
+            </button>
+          </div>
         </div>
       </div>
 
@@ -200,6 +243,10 @@ export function ComplaintsTab({
         <div className="space-y-4">
           {filtered.map((c) => {
             const isEditing = editingId === c.id;
+            const matchedOrder = orders.find(
+              (o) => o.id === c.orderId || o.orderNumber === c.orderNumber
+            );
+            const waLink = buildComplaintWhatsappLink(c);
             return (
               <div
                 key={c.id}
@@ -221,17 +268,30 @@ export function ComplaintsTab({
                     </h4>
                   </div>
 
-                  <span
-                    className={`px-2.5 py-1 rounded-md text-xs font-semibold border ${
-                      c.status === 'DISETUJUI' || c.status === 'SELESAI'
-                        ? 'bg-emerald-50 border-emerald-200 text-[#14532D]'
-                        : c.status === 'DITOLAK'
-                          ? 'bg-red-50 border-red-200 text-red-700'
-                          : 'bg-amber-50 border-amber-200 text-amber-800'
-                    }`}
-                  >
-                    {COMPLAINT_STATUS_LABELS[c.status]}
-                  </span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {waLink && (
+                      <a
+                        href={waLink}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-emerald-200 bg-emerald-50 text-xs font-semibold text-[#14532D] hover:bg-emerald-100 whitespace-nowrap"
+                      >
+                        <MessageCircle className="w-3.5 h-3.5" aria-hidden="true" />
+                        <span>Hubungi Pelanggan via WA</span>
+                      </a>
+                    )}
+                    <span
+                      className={`px-2.5 py-1 rounded-md text-xs font-semibold border ${
+                        c.status === 'DISETUJUI' || c.status === 'SELESAI'
+                          ? 'bg-emerald-50 border-emerald-200 text-[#14532D]'
+                          : c.status === 'DITOLAK'
+                            ? 'bg-red-50 border-red-200 text-red-700'
+                            : 'bg-amber-50 border-amber-200 text-amber-800'
+                      }`}
+                    >
+                      {COMPLAINT_STATUS_LABELS[c.status]}
+                    </span>
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3 bg-zinc-50 border border-zinc-200 rounded-lg p-3.5 text-xs">
@@ -255,6 +315,31 @@ export function ComplaintsTab({
                     </p>
                   </div>
                 </div>
+
+                {matchedOrder && (
+                  <div className="rounded-lg border border-zinc-200 bg-white p-3 text-xs space-y-1.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-zinc-600">
+                      <span className="font-semibold text-zinc-900">
+                        Rincian Barang Pesanan #{matchedOrder.orderNumber}
+                      </span>
+                      <span className="font-mono font-semibold text-zinc-900 tabular-price">
+                        {matchedOrder.paymentMethod} · Total {formatRupiah(matchedOrder.total)}
+                      </span>
+                    </div>
+                    <div className="divide-y divide-zinc-100">
+                      {matchedOrder.items.map((item, idx) => (
+                        <div key={idx} className="py-1 flex justify-between gap-2 text-zinc-700">
+                          <span>
+                            {item.productName} ({item.variantLabel}) x{item.quantity}
+                          </span>
+                          <span className="font-mono tabular-price">
+                            {formatRupiah(item.unitPrice * item.quantity)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 <p className="text-xs text-zinc-800 leading-relaxed">
                   <span className="font-semibold text-zinc-600">Keluhan pelanggan: </span>

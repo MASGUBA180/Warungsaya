@@ -257,6 +257,7 @@ export default function App() {
     <div className="min-h-screen flex flex-col bg-[#FAFAFA] text-zinc-900">
       {quotaBanner}
       <Header
+        storeName={settings.name}
         cartCount={totalCartCount}
         customer={customer}
         onOpenCart={() => setIsCartOpen(true)}
@@ -325,6 +326,7 @@ export default function App() {
         customerToken={customerToken}
         onUpdateQuantity={handleUpdateQuantity}
         onRemoveItem={handleRemoveItem}
+        onClearCart={() => setCartItems([])}
         onOrderCreated={() => {
           setCartItems([]);
           fetchStoreCatalog();

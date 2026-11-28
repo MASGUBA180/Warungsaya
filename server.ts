@@ -229,6 +229,7 @@ function requireCustomerAuth(
     name: record.name,
     phone: record.phone,
     defaultAddress: record.defaultAddress,
+    savedCoords: record.savedCoords ?? null,
     createdAt: record.createdAt,
   };
   next();
@@ -533,6 +534,44 @@ async function startServer() {
     res.json({user: req.user});
   });
 
+  app.patch('/api/ops/me/password', requireAuth, (req: AuthenticatedRequest, res) => {
+    if (req.user!.id === 'env-owner') {
+      res.status(400).json({
+        error:
+          'Akun darurat env OWNER_PASSCODE diatur melalui Secrets. Masuk memakai akun Pemilik terdaftar untuk mengganti kata sandi di sini.',
+      });
+      return;
+    }
+    const currentPasscode = String(req.body?.currentPasscode || '');
+    const newPasscode = String(req.body?.newPasscode || '');
+    if (newPasscode.length < 6) {
+      res.status(400).json({error: 'Kata sandi baru minimal 6 karakter.'});
+      return;
+    }
+
+    const db = loadDatabase();
+    const staffMember = db.staff.find((s) => s.id === req.user!.id && s.active);
+    if (!staffMember) {
+      res.status(404).json({error: 'Akun staf tidak ditemukan.'});
+      return;
+    }
+    if (!verifyPasscode(currentPasscode, staffMember.passcodeHash)) {
+      res.status(403).json({error: 'Kata sandi saat ini tidak cocok.'});
+      return;
+    }
+
+    staffMember.passcodeHash = hashPasscode(newPasscode);
+    recordAuditLog(
+      db,
+      req.user!,
+      'GANTI_SANDI_SENDIRI',
+      staffMember.username,
+      'Staf memperbarui kata sandi akun sendiri'
+    );
+    saveDatabase(db);
+    res.json({updated: true});
+  });
+
   // --- CUSTOMER ACCOUNT & PORTAL ROUTES ---
   app.post('/api/customer/register', (req, res) => {
     const name = String(req.body?.name || '').trim();
@@ -582,6 +621,7 @@ async function startServer() {
       name: newCustomer.name,
       phone: newCustomer.phone,
       defaultAddress: newCustomer.defaultAddress,
+      savedCoords: newCustomer.savedCoords ?? null,
       createdAt: newCustomer.createdAt,
     };
 
@@ -615,6 +655,7 @@ async function startServer() {
       name: customer.name,
       phone: customer.phone,
       defaultAddress: customer.defaultAddress,
+      savedCoords: customer.savedCoords ?? null,
       createdAt: customer.createdAt,
     };
 
@@ -663,6 +704,12 @@ async function startServer() {
       const nextAddr = String(req.body?.defaultAddress || target.defaultAddress).trim();
       if (nextName.length >= 2) target.name = nextName;
       if (nextAddr.length >= 4) target.defaultAddress = nextAddr;
+      if (req.body?.savedCoords === null) {
+        target.savedCoords = null;
+      } else if (req.body?.savedCoords !== undefined) {
+        const parsed = parseGeoPoint(req.body.savedCoords);
+        if (parsed) target.savedCoords = parsed;
+      }
 
       saveDatabase(db);
       res.json({
@@ -671,6 +718,7 @@ async function startServer() {
           name: target.name,
           phone: target.phone,
           defaultAddress: target.defaultAddress,
+          savedCoords: target.savedCoords ?? null,
           createdAt: target.createdAt,
         },
       });
@@ -1307,6 +1355,16 @@ async function startServer() {
     (req: AuthenticatedRequest, res) => {
       const db = loadDatabase();
       const isOwner = req.user!.role === 'PEMILIK';
+      const name = String(req.body?.name ?? db.settings.name).trim();
+      const tagline = String(req.body?.tagline ?? db.settings.tagline).trim();
+      const streetAddress = String(req.body?.streetAddress ?? db.settings.streetAddress).trim();
+      const district = String(req.body?.district ?? db.settings.district).trim();
+      const province = String(req.body?.province ?? db.settings.province).trim();
+      const fullAddress = String(req.body?.fullAddress ?? db.settings.fullAddress).trim();
+      const rawMapsUrl = String(req.body?.mapsUrl ?? db.settings.mapsUrl).trim();
+      const safeMapsUrl =
+        /^https?:\/\//i.test(rawMapsUrl) ? rawMapsUrl : db.settings.mapsUrl;
+
       const hours = String(req.body?.hours || db.settings.hours).trim();
       const daysOpen = String(req.body?.daysOpen || db.settings.daysOpen).trim();
       const deliveryArea = String(
@@ -1331,6 +1389,13 @@ async function startServer() {
 
       db.settings = {
         ...db.settings,
+        name: name.length >= 2 ? name : db.settings.name,
+        tagline: tagline || db.settings.tagline,
+        streetAddress: streetAddress || db.settings.streetAddress,
+        district: district || db.settings.district,
+        province: province || db.settings.province,
+        fullAddress: fullAddress || db.settings.fullAddress,
+        mapsUrl: safeMapsUrl,
         hours,
         daysOpen,
         deliveryArea,
@@ -1351,7 +1416,7 @@ async function startServer() {
         req.user!,
         'UBAH_PENGATURAN',
         'StoreSettings',
-        `Perbarui jam buka / ongkir / koordinat / WA toko`
+        `Perbarui profil / jam buka / ongkir / koordinat / WA toko`
       );
       saveDatabase(db);
       res.json({settings: db.settings});
@@ -1702,6 +1767,8 @@ async function startServer() {
       db.orders.unshift(posOrder);
 
       if (paymentMethod === 'KASBON') {
+        const rawDue = String(req.body?.kasbonDueDate || '').trim();
+        const dueDate = /^\d{4}-\d{2}-\d{2}$/.test(rawDue) ? rawDue : undefined;
         db.kasbon.unshift({
           id: `ksb-${crypto.randomUUID().slice(0, 8)}`,
           customerName,
@@ -1709,6 +1776,7 @@ async function startServer() {
           address: notes || 'Warga Gunung Batin Udik',
           amountDue: total,
           totalPaid: 0,
+          dueDate,
           note: `Bon Kasir #${orderNumber}`,
           updatedAt: now,
         });
@@ -2881,6 +2949,31 @@ async function startServer() {
       db.ledger.unshift({...entry});
       saveDatabase(db);
       res.status(201).json({entry});
+    }
+  );
+
+  // Keuangan, Direktur & Pemilik: Delete mistaken Ledger Entry
+  app.delete(
+    '/api/ops/ledger/:id',
+    requireAuth,
+    requireRoles(['PEMILIK', 'DIREKTUR', 'KEUANGAN']),
+    (req: AuthenticatedRequest, res) => {
+      const db = loadDatabase();
+      const idx = db.ledger.findIndex((l) => l.id === req.params.id);
+      if (idx === -1) {
+        res.status(404).json({error: 'Catatan kas tidak ditemukan.'});
+        return;
+      }
+      const [removed] = db.ledger.splice(idx, 1);
+      recordAuditLog(
+        db,
+        req.user!,
+        'HAPUS_KAS',
+        removed.category,
+        `Hapus catatan ${removed.type} Rp ${removed.amount.toLocaleString('id-ID')}: ${removed.description}`
+      );
+      saveDatabase(db);
+      res.json({deletedId: removed.id});
     }
   );
 

@@ -1,4 +1,4 @@
-import {Check, Copy, MapPin, Minus, Plus, QrCode, ShoppingBag, Trash2, X} from 'lucide-react';
+import {Check, Copy, MapPin, MessageCircle, Minus, Plus, QrCode, ShoppingBag, Trash2, X} from 'lucide-react';
 import {FormEvent, useEffect, useState} from 'react';
 import {apiFetch} from '../lib/apiClient';
 import {formatRupiah} from '../lib/storeData';
@@ -50,6 +50,7 @@ interface CartDrawerProps {
   customerToken?: string | null;
   onUpdateQuantity: (key: string, delta: number) => void;
   onRemoveItem: (key: string) => void;
+  onClearCart?: () => void;
   onOrderCreated: (orderNumber: string) => void;
   onOpenTracker: (code: string) => void;
 }
@@ -63,6 +64,7 @@ export function CartDrawer({
   customerToken,
   onUpdateQuantity,
   onRemoveItem,
+  onClearCart,
   onOrderCreated,
   onOpenTracker,
 }: CartDrawerProps) {
@@ -76,10 +78,13 @@ export function CartDrawer({
   const [notes, setNotes] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [confirmingQris, setConfirmingQris] = useState(false);
+  const [confirmClearCart, setConfirmClearCart] = useState(false);
   const [formError, setFormError] = useState('');
   const [receipt, setReceipt] = useState<OrderReceipt | null>(null);
   const [copiedReceipt, setCopiedReceipt] = useState(false);
-  const [customerCoords, setCustomerCoords] = useState<GeoPoint | null>(null);
+  const [customerCoords, setCustomerCoords] = useState<GeoPoint | null>(
+    customer?.savedCoords ?? null
+  );
   const [gpsStatus, setGpsStatus] = useState('');
 
   useEffect(() => {
@@ -89,6 +94,9 @@ export function CartDrawer({
       setAddressNote((prev) =>
         prev === 'Gang Makam, Gunung Batin Udik' || !prev ? customer.defaultAddress : prev
       );
+      if (customer.savedCoords) {
+        setCustomerCoords((prev) => prev ?? customer.savedCoords ?? null);
+      }
     }
   }, [customer]);
 
@@ -105,8 +113,19 @@ export function CartDrawer({
 
   const subtotal = items.reduce((sum, item) => sum + item.variant.price * item.quantity, 0);
   const freeDelivery = subtotal >= settings.freeDeliveryMin;
+  const freeDeliveryShortfall = Math.max(0, settings.freeDeliveryMin - subtotal);
+  const freeDeliveryProgress =
+    settings.freeDeliveryMin > 0
+      ? Math.min(100, Math.round((subtotal / settings.freeDeliveryMin) * 100))
+      : 100;
   const deliveryFee = deliveryMethod === 'cod' && !freeDelivery ? settings.deliveryFee : 0;
   const grandTotal = subtotal + deliveryFee;
+  const waDigits = (settings.whatsappNumber || '6281279008899').replace(/\D/g, '');
+  const storeWaLink = receipt
+    ? `https://wa.me/${waDigits}?text=${encodeURIComponent(
+        `Halo ${settings.name}, saya ${receipt.customerName} konfirmasi pesanan #${receipt.orderNumber} senilai ${formatRupiah(receipt.total)}.`
+      )}`
+    : '';
 
   const handleSubmitOrder = async (e: FormEvent) => {
     e.preventDefault();
@@ -382,6 +401,18 @@ export function CartDrawer({
                 )}
               </button>
 
+              {storeWaLink && (
+                <a
+                  href={storeWaLink}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="w-full inline-flex items-center justify-center gap-2 py-2.5 px-4 min-h-[42px] rounded-lg border border-emerald-200 bg-emerald-50 text-[#14532D] text-sm font-semibold hover:bg-emerald-100 transition-colors"
+                >
+                  <MessageCircle className="w-4 h-4" aria-hidden="true" />
+                  <span>Hubungi Toko via WhatsApp</span>
+                </a>
+              )}
+
               <button
                 type="button"
                 onClick={handleNewOrder}
@@ -411,6 +442,44 @@ export function CartDrawer({
         ) : (
           <form onSubmit={handleSubmitOrder} className="flex-1 flex flex-col min-h-0">
             <div className="flex-1 overflow-y-auto p-6 space-y-5">
+              {onClearCart && (
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-zinc-500 font-medium">
+                    {items.reduce((s, i) => s + i.quantity, 0)} barang dipilih
+                  </span>
+                  {confirmClearCart ? (
+                    <span className="inline-flex items-center gap-2">
+                      <span className="text-red-700 font-medium">Kosongkan?</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onClearCart();
+                          setConfirmClearCart(false);
+                        }}
+                        className="font-bold text-red-700 underline cursor-pointer"
+                      >
+                        Ya
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmClearCart(false)}
+                        className="text-zinc-600 cursor-pointer"
+                      >
+                        Batal
+                      </button>
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setConfirmClearCart(true)}
+                      className="text-zinc-500 hover:text-red-600 cursor-pointer"
+                    >
+                      Kosongkan Keranjang
+                    </button>
+                  )}
+                </div>
+              )}
+
               <div className="divide-y divide-zinc-200 border border-zinc-200 rounded-xl bg-white">
                 {items.map((item) => (
                   <div key={item.key} className="p-4 flex items-start justify-between gap-3">
@@ -486,13 +555,19 @@ export function CartDrawer({
                   </button>
                 </div>
                 {deliveryMethod === 'cod' && (
-                  <p className="text-xs text-zinc-500">
-                    {freeDelivery
-                      ? 'Gratis ongkir sekitar Gang Makam & Gunung Batin Udik.'
-                      : `Ongkir ${formatRupiah(settings.deliveryFee)} (gratis min. belanja ${formatRupiah(
-                          settings.freeDeliveryMin
-                        )}).`}
-                  </p>
+                  <div className="rounded-lg bg-zinc-50 border border-zinc-200 p-3 space-y-1.5">
+                    <p className="text-xs text-zinc-700 font-medium tabular-price">
+                      {freeDelivery
+                        ? 'Selamat! Gratis ongkir sekitar Gang Makam & Gunung Batin Udik aktif.'
+                        : `Tambah belanja ${formatRupiah(freeDeliveryShortfall)} lagi untuk gratis ongkir (hemat ${formatRupiah(settings.deliveryFee)}).`}
+                    </p>
+                    <div className="w-full h-1.5 rounded-full bg-zinc-200 overflow-hidden">
+                      <div
+                        className="h-full bg-[#14532D] transition-[width] duration-300"
+                        style={{width: `${freeDeliveryProgress}%`}}
+                      />
+                    </div>
+                  </div>
                 )}
               </div>
 

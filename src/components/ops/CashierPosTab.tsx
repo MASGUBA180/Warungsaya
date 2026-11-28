@@ -21,6 +21,7 @@ import {
 import type {
   CashierShift,
   DivisionRole,
+  KasbonRecord,
   Order,
   OrderStatus,
   PaymentMethod,
@@ -55,6 +56,7 @@ interface CashierPosTabProps {
   orders: Order[];
   shifts: CashierShift[];
   couriers?: PublicStaffProfile[];
+  kasbon?: KasbonRecord[];
   authToken: string;
   onRefresh: () => Promise<void>;
 }
@@ -95,6 +97,7 @@ export function CashierPosTab({
   orders,
   shifts,
   couriers = [],
+  kasbon = [],
   authToken,
   onRefresh,
 }: CashierPosTabProps) {
@@ -107,6 +110,7 @@ export function CashierPosTab({
   const [customerName, setCustomerName] = useState('Pembeli Toko');
   const [phone, setPhone] = useState('');
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('TUNAI');
+  const [kasbonDueDate, setKasbonDueDate] = useState('');
   const [discountMode, setDiscountMode] = useState<'RP' | 'PERCENT'>('RP');
   const [discountAmount, setDiscountAmount] = useState('');
   const [cashReceived, setCashReceived] = useState('');
@@ -118,6 +122,12 @@ export function CashierPosTab({
   >(null);
   const [orderActionError, setOrderActionError] = useState('');
   const [submitting, setSubmitting] = useState(false);
+
+  // Filters for online queue & POS history
+  const [onlineStatusFilter, setOnlineStatusFilter] = useState<'ALL' | OrderStatus>('ALL');
+  const [onlineSearch, setOnlineSearch] = useState('');
+  const [posHistorySearch, setPosHistorySearch] = useState('');
+  const [showShiftHistory, setShowShiftHistory] = useState(false);
 
   const [heldTickets, setHeldTickets] = useState<HeldReceiptTicket[]>(() => {
     try {
@@ -299,6 +309,7 @@ export function CashierPosTab({
           customerName: customerName.trim() || 'Pembeli Toko',
           phone: phone.trim() || '-',
           paymentMethod,
+          kasbonDueDate: paymentMethod === 'KASBON' && kasbonDueDate ? kasbonDueDate : undefined,
           discountAmount: parsedDiscount,
           notes: notes.trim(),
           items: basket.map((i) => ({
@@ -328,6 +339,7 @@ export function CashierPosTab({
       setBasket([]);
       setCustomerName('Pembeli Toko');
       setPhone('');
+      setKasbonDueDate('');
       setDiscountAmount('');
       setCashReceived('');
       setNotes('');
@@ -441,6 +453,36 @@ export function CashierPosTab({
   };
 
   const onlineOrders = orders.filter((o) => o.source === 'ONLINE');
+  const onlineSearchNorm = onlineSearch.trim().toLowerCase();
+  const filteredOnlineOrders = onlineOrders.filter((o) => {
+    if (onlineStatusFilter !== 'ALL' && o.status !== onlineStatusFilter) return false;
+    if (
+      onlineSearchNorm &&
+      !o.orderNumber.toLowerCase().includes(onlineSearchNorm) &&
+      !o.customerName.toLowerCase().includes(onlineSearchNorm) &&
+      !o.phone.toLowerCase().includes(onlineSearchNorm)
+    ) {
+      return false;
+    }
+    return true;
+  });
+
+  const posOrders = orders.filter((o) => o.source === 'POS');
+  const posHistNorm = posHistorySearch.trim().toLowerCase();
+  const filteredPosOrders = posOrders.filter(
+    (o) =>
+      !posHistNorm ||
+      o.orderNumber.toLowerCase().includes(posHistNorm) ||
+      o.customerName.toLowerCase().includes(posHistNorm)
+  );
+  const closedShifts = shifts.filter((s) => s.status === 'DITUTUP');
+  const uniqueKasbonCustomers = Array.from(
+    new Map(
+      kasbon
+        .filter((k) => k.customerName && k.customerName !== 'Pembeli Toko')
+        .map((k) => [k.customerName.toLowerCase(), k])
+    ).values()
+  );
 
   return (
     <div className="space-y-8">
@@ -864,6 +906,50 @@ export function CashierPosTab({
               </div>
             )}
 
+            {paymentMethod === 'KASBON' && (
+              <div className="bg-amber-50/70 border border-amber-200 rounded-lg p-3 space-y-2.5">
+                {uniqueKasbonCustomers.length > 0 && (
+                  <div>
+                    <label htmlFor="pos-kasbon-pick" className="block text-xs text-zinc-700 mb-1">
+                      Pilih Pelanggan Bon Tersimpan (Opsional)
+                    </label>
+                    <select
+                      id="pos-kasbon-pick"
+                      defaultValue=""
+                      onChange={(e) => {
+                        const found = uniqueKasbonCustomers.find((k) => k.id === e.target.value);
+                        if (found) {
+                          setCustomerName(found.customerName);
+                          if (found.phone) setPhone(found.phone);
+                          if (found.address) setNotes(found.address);
+                        }
+                      }}
+                      className="w-full px-2.5 py-1.5 text-xs bg-white border border-amber-300 rounded-md"
+                    >
+                      <option value="">-- Ketik nama baru atau pilih pelanggan --</option>
+                      {uniqueKasbonCustomers.map((k) => (
+                        <option key={k.id} value={k.id}>
+                          {k.customerName} (Sisa {formatRupiah(Math.max(0, k.amountDue - k.totalPaid))})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+                <div>
+                  <label htmlFor="pos-kasbon-due" className="block text-xs text-zinc-700 mb-1">
+                    Tanggal Jatuh Tempo Bon (Opsional)
+                  </label>
+                  <input
+                    id="pos-kasbon-due"
+                    type="date"
+                    value={kasbonDueDate}
+                    onChange={(e) => setKasbonDueDate(e.target.value)}
+                    className="w-full px-2.5 py-1.5 text-xs bg-white border border-amber-300 rounded-md"
+                  />
+                </div>
+              </div>
+            )}
+
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label htmlFor="pos-phone" className="block text-xs text-zinc-600 mb-1">
@@ -1022,15 +1108,54 @@ export function CashierPosTab({
 
       {/* Incoming Online & COD Orders */}
       <div className="bg-white border border-zinc-200 rounded-xl overflow-hidden print:hidden">
-        <div className="px-6 py-4 border-b border-zinc-200">
-          <h3 className="text-base font-semibold text-zinc-900">
-            Antrean Pesanan Online &amp; COD Masuk
-          </h3>
-          <p className="text-xs text-zinc-500 mt-0.5">
-            {role === 'KASIR'
-              ? 'Konfirmasi pesanan warga, tugaskan kurir antar COD, verifikasi pembayaran QRIS, dan selesaikan pengambilan di toko.'
-              : 'Kelola antrean pesanan online, tugaskan kurir COD, verifikasi QRIS masuk, atau teruskan ke Kurir.'}
-          </p>
+        <div className="px-6 py-4 border-b border-zinc-200 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="text-base font-semibold text-zinc-900">
+                Antrean Pesanan Online &amp; COD Masuk
+              </h3>
+              <p className="text-xs text-zinc-500 mt-0.5">
+                {role === 'KASIR'
+                  ? 'Konfirmasi pesanan warga, tugaskan kurir antar COD, verifikasi pembayaran QRIS, dan selesaikan pengambilan di toko.'
+                  : 'Kelola antrean pesanan online, tugaskan kurir COD, verifikasi QRIS masuk, atau teruskan ke Kurir.'}
+              </p>
+            </div>
+            <input
+              type="search"
+              value={onlineSearch}
+              onChange={(e) => setOnlineSearch(e.target.value)}
+              placeholder="Cari kode, nama, atau HP..."
+              aria-label="Cari pesanan online"
+              className="px-3 py-1.5 text-xs border border-zinc-300 rounded-lg w-full sm:w-56"
+            />
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5">
+            {(
+              [
+                {id: 'ALL', label: `Semua (${onlineOrders.length})`},
+                {id: 'MENUNGGU', label: 'Menunggu'},
+                {id: 'DISIAPKAN', label: 'Disiapkan'},
+                {id: 'DIANTAR', label: 'Diantar'},
+                {id: 'SELESAI', label: 'Selesai'},
+                {id: 'DIBATALKAN', label: 'Batal'},
+              ] as {id: 'ALL' | OrderStatus; label: string}[]
+            ).map((chip) => (
+              <button
+                key={chip.id}
+                type="button"
+                onClick={() => setOnlineStatusFilter(chip.id)}
+                className={`px-2.5 py-1 rounded-md text-xs font-medium cursor-pointer whitespace-nowrap ${
+                  onlineStatusFilter === chip.id
+                    ? 'bg-[#14532D] text-white'
+                    : 'border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50'
+                }`}
+              >
+                {chip.label}
+              </button>
+            ))}
+          </div>
+
           {orderActionError && (
             <p className="mt-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-2.5">
               {orderActionError}
@@ -1038,9 +1163,11 @@ export function CashierPosTab({
           )}
         </div>
 
-        {onlineOrders.length === 0 ? (
+        {filteredOnlineOrders.length === 0 ? (
           <div className="p-8 text-center text-sm text-zinc-500">
-            Belum ada pesanan online masuk.
+            {onlineOrders.length === 0
+              ? 'Belum ada pesanan online masuk.'
+              : 'Tidak ada pesanan online pada filter ini.'}
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -1056,7 +1183,7 @@ export function CashierPosTab({
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-100">
-                {onlineOrders.map((ord) => (
+                {filteredOnlineOrders.map((ord) => (
                   <tr key={ord.id} className="hover:bg-zinc-50 align-top">
                     <td className="py-3 px-4 font-mono text-xs font-semibold text-zinc-800 tabular-price">
                       {ord.orderNumber}
@@ -1217,6 +1344,167 @@ export function CashierPosTab({
           </div>
         )}
       </div>
+
+      {/* Riwayat Transaksi Kasir (POS) */}
+      <div className="bg-white border border-zinc-200 rounded-xl overflow-hidden print:hidden">
+        <div className="px-6 py-4 border-b border-zinc-200 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="text-base font-semibold text-zinc-900">
+              Riwayat Transaksi Kasir (POS)
+            </h3>
+            <p className="text-xs text-zinc-500 mt-0.5 tabular-price">
+              Menampilkan {Math.min(15, filteredPosOrders.length)} dari {posOrders.length} transaksi langsung di toko.
+            </p>
+          </div>
+          <input
+            type="search"
+            value={posHistorySearch}
+            onChange={(e) => setPosHistorySearch(e.target.value)}
+            placeholder="Cari no. struk atau pembeli..."
+            aria-label="Cari riwayat POS"
+            className="px-3 py-1.5 text-xs border border-zinc-300 rounded-lg w-full sm:w-56"
+          />
+        </div>
+
+        {filteredPosOrders.length === 0 ? (
+          <div className="p-6 text-center text-sm text-zinc-500">
+            Belum ada riwayat transaksi kasir POS.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse text-sm">
+              <thead>
+                <tr className="border-b border-zinc-200 bg-zinc-50 text-xs text-zinc-500">
+                  <th className="py-3 px-4 font-medium">No. Struk</th>
+                  <th className="py-3 px-4 font-medium">Pembeli</th>
+                  <th className="py-3 px-4 font-medium">Ringkasan Barang</th>
+                  <th className="py-3 px-4 font-medium">Metode</th>
+                  <th className="py-3 px-4 font-medium text-right">Total</th>
+                  <th className="py-3 px-4 font-medium text-right">Struk</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-100 text-xs">
+                {filteredPosOrders.slice(0, 15).map((ord) => (
+                  <tr key={ord.id} className="hover:bg-zinc-50">
+                    <td className="py-2.5 px-4 font-mono font-semibold text-zinc-800 tabular-price">
+                      {ord.orderNumber}
+                      <div className="font-sans font-normal text-zinc-400">
+                        {formatShortDate(ord.createdAt)}
+                      </div>
+                    </td>
+                    <td className="py-2.5 px-4 font-medium text-zinc-900">{ord.customerName}</td>
+                    <td className="py-2.5 px-4 text-zinc-600">
+                      {ord.items
+                        .map((i) => `${i.productName} (${i.variantLabel}) x${i.quantity}`)
+                        .join(', ')}
+                    </td>
+                    <td className="py-2.5 px-4 text-zinc-700 font-medium">{ord.paymentMethod}</td>
+                    <td className="py-2.5 px-4 text-right font-mono font-semibold text-zinc-900 tabular-price">
+                      {formatRupiah(ord.total)}
+                    </td>
+                    <td className="py-2.5 px-4 text-right">
+                      <div className="inline-flex items-center gap-1.5">
+                        <a
+                          href={buildPosWhatsappReceiptLink(ord)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="px-2.5 py-1 rounded border border-emerald-200 bg-emerald-50 text-[#14532D] font-medium hover:bg-emerald-100 whitespace-nowrap"
+                        >
+                          WA
+                        </a>
+                        <button
+                          type="button"
+                          onClick={() => setLastPosOrder(ord)}
+                          className="px-2.5 py-1 rounded border border-zinc-300 bg-white text-zinc-800 font-medium hover:bg-zinc-50 cursor-pointer whitespace-nowrap"
+                        >
+                          Lihat Struk
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Riwayat Shift Kasir & Selisih Laci */}
+      {closedShifts.length > 0 && (
+        <div className="bg-white border border-zinc-200 rounded-xl overflow-hidden print:hidden">
+          <div className="px-6 py-4 border-b border-zinc-200 flex items-center justify-between gap-3">
+            <div>
+              <h3 className="text-base font-semibold text-zinc-900">
+                Riwayat Tutup Shift &amp; Selisih Laci ({closedShifts.length})
+              </h3>
+              <p className="text-xs text-zinc-500 mt-0.5">
+                Rekap kesesuaian kas tunai sistem dan uang fisik saat tutup laci.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowShiftHistory((v) => !v)}
+              className="px-3 py-1.5 rounded-lg border border-zinc-300 bg-white text-xs font-medium text-zinc-800 hover:bg-zinc-50 cursor-pointer whitespace-nowrap"
+            >
+              {showShiftHistory ? 'Tutup Tabel' : 'Lihat Riwayat Shift'}
+            </button>
+          </div>
+          {showShiftHistory && (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="border-b border-zinc-200 bg-zinc-50 text-zinc-500">
+                    <th className="py-2.5 px-4 font-medium">Kasir &amp; Waktu</th>
+                    <th className="py-2.5 px-4 font-medium text-right">Modal Awal</th>
+                    <th className="py-2.5 px-4 font-medium text-right">Perkiraan Sistem</th>
+                    <th className="py-2.5 px-4 font-medium text-right">Fisik Dihitung</th>
+                    <th className="py-2.5 px-4 font-medium text-right">Selisih Laci</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-100">
+                  {closedShifts.slice(0, 12).map((sh) => {
+                    const diff = sh.discrepancy ?? 0;
+                    return (
+                      <tr key={sh.id} className="hover:bg-zinc-50">
+                        <td className="py-2.5 px-4">
+                          <p className="font-semibold text-zinc-900">{sh.cashierName}</p>
+                          <p className="text-zinc-500">
+                            {formatShortDate(sh.closedAt || sh.openedAt)}
+                          </p>
+                        </td>
+                        <td className="py-2.5 px-4 text-right font-mono tabular-price text-zinc-600">
+                          {formatRupiah(sh.openingCash)}
+                        </td>
+                        <td className="py-2.5 px-4 text-right font-mono tabular-price text-zinc-900">
+                          {formatRupiah(sh.expectedCash)}
+                        </td>
+                        <td className="py-2.5 px-4 text-right font-mono tabular-price text-zinc-900">
+                          {formatRupiah(sh.countedCash ?? sh.expectedCash)}
+                        </td>
+                        <td className="py-2.5 px-4 text-right font-mono font-semibold tabular-price">
+                          <span
+                            className={`inline-block px-2 py-0.5 rounded border text-[11px] ${
+                              diff === 0
+                                ? 'bg-emerald-50 border-emerald-200 text-[#14532D]'
+                                : diff > 0
+                                  ? 'bg-zinc-50 border-zinc-300 text-zinc-800'
+                                  : 'bg-red-50 border-red-200 text-red-700'
+                            }`}
+                          >
+                            {diff === 0
+                              ? 'Pas (Rp 0)'
+                              : `${diff > 0 ? '+' : '-'}${formatRupiah(Math.abs(diff))}`}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
