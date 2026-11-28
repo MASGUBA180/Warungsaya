@@ -106,6 +106,19 @@ export function normalizeWhatsappNumber(phone: string): string {
   return digits;
 }
 
+export function buildOrderTrackingUrl(
+  storeUrl: string | undefined,
+  orderNumber: string
+): string {
+  const rawBase =
+    (storeUrl || '').trim() ||
+    (typeof window !== 'undefined' && window.location?.origin ? window.location.origin : '');
+  if (!/^https?:\/\//i.test(rawBase)) return '';
+  const cleanBase = rawBase.replace(/\/+$/, '');
+  const code = (orderNumber || '').trim();
+  return code ? `${cleanBase}/?lacak=${encodeURIComponent(code)}` : cleanBase;
+}
+
 export function buildCourierWhatsappMessage(params: {
   customerName: string;
   orderNumber: string;
@@ -115,13 +128,17 @@ export function buildCourierWhatsappMessage(params: {
   total: number;
   paymentStatus?: string;
   trigger?: 'DISIAPKAN' | 'DIANTAR' | 'SELESAI' | 'QRIS_LUNAS';
+  storeUrl?: string;
 }): string {
   const totalStr = `Rp ${params.total.toLocaleString('id-ID')}`;
+  const trackUrl = buildOrderTrackingUrl(params.storeUrl, params.orderNumber);
+
   if (params.trigger === 'QRIS_LUNAS') {
     return [
       `Halo ${params.customerName},`,
       `Pembayaran QRIS untuk pesanan *${params.orderNumber}* sebesar *${totalStr}* di *Toko Dimas Jaya* telah *LUNAS* terverifikasi.`,
       `Pesanan Anda segera kami siapkan.`,
+      ...(trackUrl ? [`Cek status pesanan di web: ${trackUrl}`] : []),
     ].join('\n');
   }
   if (params.trigger === 'SELESAI') {
@@ -129,6 +146,7 @@ export function buildCourierWhatsappMessage(params: {
       `Halo ${params.customerName},`,
       `Pesanan *${params.orderNumber}* dari *Toko Dimas Jaya* telah selesai diserahkan.`,
       `Terima kasih telah berbelanja! Jika ada kendala barang, gunakan menu Akun Saya / Lacak Pesanan untuk pengajuan retur.`,
+      ...(trackUrl ? [`Link pesanan: ${trackUrl}`] : []),
     ].join('\n');
   }
 
@@ -147,7 +165,9 @@ export function buildCourierWhatsappMessage(params: {
     `Tujuan: ${params.addressNote}`,
     etaText,
     payText,
-    `Pantau posisi kurir di peta lewat menu Lacak Pesanan.`,
+    trackUrl
+      ? `Pantau posisi kurir & status pesanan di web:\n${trackUrl}`
+      : `Pantau posisi kurir di peta lewat menu Lacak Pesanan.`,
   ].join('\n');
 }
 
@@ -161,6 +181,7 @@ export function buildCourierWhatsappLink(params: {
   total: number;
   paymentStatus?: string;
   trigger?: 'DISIAPKAN' | 'DIANTAR' | 'SELESAI' | 'QRIS_LUNAS';
+  storeUrl?: string;
 }): {waLink: string; message: string} {
   const waNum = normalizeWhatsappNumber(params.phone);
   const message = buildCourierWhatsappMessage(params);

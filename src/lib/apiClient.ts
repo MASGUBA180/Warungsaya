@@ -478,7 +478,8 @@ function recordLocalAuditLog(
 function appendLocalWhatsappNotification(
   order: Order,
   trigger: WhatsappNotification['trigger'],
-  actorName: string
+  actorName: string,
+  storeUrl?: string
 ): WhatsappNotification {
   const {waLink, message} = buildCourierWhatsappLink({
     phone: order.phone,
@@ -490,6 +491,9 @@ function appendLocalWhatsappNotification(
     total: order.total,
     paymentStatus: order.paymentStatus,
     trigger,
+    storeUrl:
+      (storeUrl || '').trim() ||
+      (typeof window !== 'undefined' && window.location?.origin ? window.location.origin : ''),
   });
   const notif: WhatsappNotification = {
     id: randomId('wa'),
@@ -999,7 +1003,7 @@ async function handleStaticFallback(
         createdAt: now,
       });
     }
-    appendLocalWhatsappNotification(order, 'QRIS_LUNAS', 'Sistem QRIS Otomatis');
+    appendLocalWhatsappNotification(order, 'QRIS_LUNAS', 'Sistem QRIS Otomatis', db.settings.storeUrl);
     writeLocalDb(db);
     return {ok: true, status: 200, storageMode: 'browser', data: {order: sanitizeOrderForLocalPublic(order)}};
   }
@@ -1283,6 +1287,13 @@ async function handleStaticFallback(
     const nextName = String(body.name ?? db.settings.name).trim();
     const rawMapsUrl = String(body.mapsUrl ?? db.settings.mapsUrl).trim();
     const safeMapsUrl = /^https?:\/\//i.test(rawMapsUrl) ? rawMapsUrl : db.settings.mapsUrl;
+    const rawStoreUrl =
+      body.storeUrl !== undefined ? String(body.storeUrl).trim() : db.settings.storeUrl || '';
+    const safeStoreUrl = !rawStoreUrl
+      ? ''
+      : /^https?:\/\//i.test(rawStoreUrl)
+        ? rawStoreUrl.replace(/\/+$/, '')
+        : db.settings.storeUrl || '';
     const deliveryFee = Math.max(0, Number(body.deliveryFee ?? db.settings.deliveryFee));
     const freeDeliveryMin = Math.max(0, Number(body.freeDeliveryMin ?? db.settings.freeDeliveryMin));
 
@@ -1295,6 +1306,7 @@ async function handleStaticFallback(
       province: String(body.province ?? db.settings.province).trim() || db.settings.province,
       fullAddress: String(body.fullAddress ?? db.settings.fullAddress).trim() || db.settings.fullAddress,
       mapsUrl: safeMapsUrl,
+      storeUrl: safeStoreUrl,
       hours: String(body.hours || db.settings.hours).trim(),
       daysOpen: String(body.daysOpen || db.settings.daysOpen).trim(),
       deliveryArea: String(body.deliveryArea || db.settings.deliveryArea).trim(),
@@ -1659,7 +1671,7 @@ async function handleStaticFallback(
           courierCoords: order.tracking?.courierCoords ?? db.settings.storeCoords ?? null,
           updatedAt: now,
         };
-        appendLocalWhatsappNotification(order, 'DIANTAR', user.displayName);
+        appendLocalWhatsappNotification(order, 'DIANTAR', user.displayName, db.settings.storeUrl);
       } else if (nextStatus === 'SELESAI') {
         const uploadedProofPhoto = isValidUploadedPhoto(body.proofPhoto)
           ? body.proofPhoto.trim()
@@ -1735,7 +1747,7 @@ async function handleStaticFallback(
         createdAt: now,
       });
     }
-    appendLocalWhatsappNotification(order, 'QRIS_LUNAS', user.displayName);
+    appendLocalWhatsappNotification(order, 'QRIS_LUNAS', user.displayName, db.settings.storeUrl);
     writeLocalDb(db);
     return {ok: true, status: 200, storageMode: 'browser', data: {order}};
   }
@@ -1747,7 +1759,8 @@ async function handleStaticFallback(
     const notification = appendLocalWhatsappNotification(
       order,
       body.trigger || 'DIANTAR',
-      user.displayName
+      user.displayName,
+      db.settings.storeUrl
     );
     writeLocalDb(db);
     return {ok: true, status: 201, storageMode: 'browser', data: {notification, order}};
@@ -1828,7 +1841,7 @@ async function handleStaticFallback(
         body.courierCoords === null ? null : parsedCoords ?? order.tracking?.courierCoords ?? null,
       updatedAt: now,
     };
-    if (transitioned) appendLocalWhatsappNotification(order, 'DIANTAR', user.displayName);
+    if (transitioned) appendLocalWhatsappNotification(order, 'DIANTAR', user.displayName, db.settings.storeUrl);
     writeLocalDb(db);
     return {ok: true, status: 200, storageMode: 'browser', data: {order}};
   }

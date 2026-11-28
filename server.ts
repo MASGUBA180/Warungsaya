@@ -34,6 +34,7 @@ import type {
   OrderStatus,
   PaymentMethod,
   Product,
+  StoreSettings,
   SupplierDelivery,
   WhatsappNotification,
 } from './src/types/store.ts';
@@ -355,10 +356,30 @@ function recordAuditLog(
   }
 }
 
+function resolveRequestStoreUrl(req: express.Request, settings: StoreSettings): string {
+  const configured = (settings.storeUrl || '').trim();
+  if (/^https?:\/\//i.test(configured)) {
+    return configured.replace(/\/+$/, '');
+  }
+  const origin = String(req.headers.origin || '').trim();
+  if (/^https?:\/\//i.test(origin)) {
+    return origin.replace(/\/+$/, '');
+  }
+  const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'https')
+    .split(',')[0]
+    .trim();
+  const host = String(req.headers['x-forwarded-host'] || req.get('host') || '')
+    .split(',')[0]
+    .trim();
+  if (!host) return '';
+  return `${proto}://${host}`.replace(/\/+$/, '');
+}
+
 function appendWhatsappNotification(
   order: Order,
   trigger: WhatsappNotification['trigger'],
-  actorName: string
+  actorName: string,
+  storeUrl?: string
 ): WhatsappNotification {
   const {waLink, message} = buildCourierWhatsappLink({
     phone: order.phone,
@@ -370,6 +391,7 @@ function appendWhatsappNotification(
     total: order.total,
     paymentStatus: order.paymentStatus,
     trigger,
+    storeUrl,
   });
 
   const notif: WhatsappNotification = {
@@ -992,7 +1014,12 @@ async function startServer() {
       });
     }
 
-    appendWhatsappNotification(order, 'QRIS_LUNAS', 'Sistem QRIS Otomatis');
+    appendWhatsappNotification(
+      order,
+      'QRIS_LUNAS',
+      'Sistem QRIS Otomatis',
+      resolveRequestStoreUrl(req, db.settings)
+    );
     recordAuditLog(
       db,
       {id: 'gateway-qris', displayName: 'Payment Gateway QRIS', role: 'SISTEM'},
@@ -1364,6 +1391,15 @@ async function startServer() {
       const rawMapsUrl = String(req.body?.mapsUrl ?? db.settings.mapsUrl).trim();
       const safeMapsUrl =
         /^https?:\/\//i.test(rawMapsUrl) ? rawMapsUrl : db.settings.mapsUrl;
+      const rawStoreUrl =
+        req.body?.storeUrl !== undefined
+          ? String(req.body.storeUrl).trim()
+          : db.settings.storeUrl || '';
+      const safeStoreUrl = !rawStoreUrl
+        ? ''
+        : /^https?:\/\//i.test(rawStoreUrl)
+          ? rawStoreUrl.replace(/\/+$/, '')
+          : db.settings.storeUrl || '';
 
       const hours = String(req.body?.hours || db.settings.hours).trim();
       const daysOpen = String(req.body?.daysOpen || db.settings.daysOpen).trim();
@@ -1396,6 +1432,7 @@ async function startServer() {
         province: province || db.settings.province,
         fullAddress: fullAddress || db.settings.fullAddress,
         mapsUrl: safeMapsUrl,
+        storeUrl: safeStoreUrl,
         hours,
         daysOpen,
         deliveryArea,
@@ -1981,7 +2018,12 @@ async function startServer() {
             courierCoords: order.tracking?.courierCoords ?? db.settings.storeCoords ?? null,
             updatedAt: now,
           };
-          appendWhatsappNotification(order, 'DIANTAR', req.user!.displayName);
+          appendWhatsappNotification(
+            order,
+            'DIANTAR',
+            req.user!.displayName,
+            resolveRequestStoreUrl(req, db.settings)
+          );
         } else if (nextStatus === 'SELESAI') {
           const uploadedProofPhoto = isValidUploadedPhoto(req.body?.proofPhoto)
             ? req.body.proofPhoto.trim()
@@ -2095,7 +2137,12 @@ async function startServer() {
         });
       }
 
-      appendWhatsappNotification(order, 'QRIS_LUNAS', req.user!.displayName);
+      appendWhatsappNotification(
+        order,
+        'QRIS_LUNAS',
+        req.user!.displayName,
+        resolveRequestStoreUrl(req, db.settings)
+      );
       recordAuditLog(
         db,
         req.user!,
@@ -2126,7 +2173,12 @@ async function startServer() {
           : 'DIANTAR'
       ) as WhatsappNotification['trigger'];
 
-      const notification = appendWhatsappNotification(order, trigger, req.user!.displayName);
+      const notification = appendWhatsappNotification(
+        order,
+        trigger,
+        req.user!.displayName,
+        resolveRequestStoreUrl(req, db.settings)
+      );
       order.updatedAt = new Date().toISOString();
       saveDatabase(db);
       res.status(201).json({notification, order});
@@ -2277,7 +2329,12 @@ async function startServer() {
       };
 
       if (transitionedToDelivery) {
-        appendWhatsappNotification(order, 'DIANTAR', req.user!.displayName);
+        appendWhatsappNotification(
+          order,
+          'DIANTAR',
+          req.user!.displayName,
+          resolveRequestStoreUrl(req, db.settings)
+        );
       }
 
       saveDatabase(db);

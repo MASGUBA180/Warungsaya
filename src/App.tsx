@@ -93,6 +93,18 @@ export default function App() {
 
   useEffect(() => {
     fetchStoreCatalog();
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const trackCode = (params.get('lacak') || params.get('order') || '')
+        .trim()
+        .toUpperCase();
+      if (trackCode) {
+        setTrackerInitialCode(trackCode);
+        setIsTrackerOpen(true);
+      }
+    } catch {
+      // ignore invalid URLSearchParams
+    }
   }, [fetchStoreCatalog]);
 
   useEffect(() => {

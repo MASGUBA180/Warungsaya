@@ -33,7 +33,11 @@ function buildComplaintWhatsappLink(c: ComplaintRecord): string {
     : digits.startsWith('62')
       ? digits
       : `62${digits}`;
-  const msg = `Halo ${c.customerName}, kami dari *Toko Dimas Jaya* menindaklanjuti laporan komplain *${c.complaintNumber}* untuk pesanan *#${c.orderNumber}*. `;
+  const webLink =
+    typeof window !== 'undefined' && window.location?.origin
+      ? `\nPantau status komplain di web: ${window.location.origin}/?lacak=${encodeURIComponent(c.orderNumber)}`
+      : '';
+  const msg = `Halo ${c.customerName}, kami dari *Toko Dimas Jaya* menindaklanjuti laporan komplain *${c.complaintNumber}* untuk pesanan *#${c.orderNumber}*.${webLink}\n`;
   return `https://wa.me/${waPhone}?text=${encodeURIComponent(msg)}`;
 }
 

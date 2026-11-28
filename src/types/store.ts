@@ -105,6 +105,7 @@ export interface StoreSettings {
   deliveryFee: number;
   freeDeliveryMin: number;
   mapsUrl: string;
+  storeUrl?: string;
   heroImage: string;
   storeCoords?: GeoPoint | null;
   whatsappNumber?: string;

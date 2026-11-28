@@ -703,19 +703,27 @@ export function CourierTab({
               const isMine =
                 Boolean(currentUser?.id) && ord.assignedCourierId === currentUser?.id;
               const latestWa = ord.whatsappNotifications?.[0];
+              const effectiveStoreUrl =
+                (settings.storeUrl || '').trim() ||
+                (typeof window !== 'undefined' && window.location?.origin
+                  ? window.location.origin
+                  : '');
+              const generatedWaLink = buildCourierWhatsappLink({
+                phone: ord.phone,
+                customerName: ord.customerName,
+                orderNumber: ord.orderNumber,
+                courierName: ord.assignedCourierName || ord.courierName || 'Kurir Toko',
+                etaMinutes: ord.tracking?.etaMinutes,
+                addressNote: ord.addressNote,
+                total: ord.total,
+                paymentStatus: ord.paymentStatus,
+                trigger: ord.status === 'SELESAI' ? 'SELESAI' : 'DIANTAR',
+                storeUrl: effectiveStoreUrl,
+              }).waLink;
               const directWaLink =
-                latestWa?.waLink ||
-                buildCourierWhatsappLink({
-                  phone: ord.phone,
-                  customerName: ord.customerName,
-                  orderNumber: ord.orderNumber,
-                  courierName: ord.assignedCourierName || ord.courierName || 'Kurir Toko',
-                  etaMinutes: ord.tracking?.etaMinutes,
-                  addressNote: ord.addressNote,
-                  total: ord.total,
-                  paymentStatus: ord.paymentStatus,
-                  trigger: 'DIANTAR',
-                }).waLink;
+                latestWa?.waLink && /https?:\/\//i.test(latestWa.message || '')
+                  ? latestWa.waLink
+                  : generatedWaLink;
               return (
                 <div
                   key={ord.id}

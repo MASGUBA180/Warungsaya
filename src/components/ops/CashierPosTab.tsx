@@ -85,7 +85,11 @@ function buildPosWhatsappReceiptLink(order: Order): string {
     (order.discountAmount || 0) > 0
       ? `\nDiskon: -${formatRupiah(order.discountAmount || 0)}`
       : '';
-  const text = `Struk Belanja *Toko Dimas Jaya*\nNo: #${order.orderNumber}\nPembeli: ${order.customerName}\n\n${itemLines}${discountLine}\n*Total: ${formatRupiah(order.total)}* (${order.paymentMethod})\n\nTerima kasih sudah berbelanja di Toko Dimas Jaya.`;
+  const webLink =
+    typeof window !== 'undefined' && window.location?.origin
+      ? `\nLacak & belanja ulang di web: ${window.location.origin}/?lacak=${encodeURIComponent(order.orderNumber)}`
+      : '';
+  const text = `Struk Belanja *Toko Dimas Jaya*\nNo: #${order.orderNumber}\nPembeli: ${order.customerName}\n\n${itemLines}${discountLine}\n*Total: ${formatRupiah(order.total)}* (${order.paymentMethod})\n\nTerima kasih sudah berbelanja di Toko Dimas Jaya.${webLink}`;
   return waPhone
     ? `https://wa.me/${waPhone}?text=${encodeURIComponent(text)}`
     : `https://wa.me/?text=${encodeURIComponent(text)}`;

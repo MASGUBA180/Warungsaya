@@ -129,6 +129,7 @@ export function OwnerOverviewTab({
   const [provinceInput, setProvinceInput] = useState(settings.province);
   const [fullAddressInput, setFullAddressInput] = useState(settings.fullAddress);
   const [mapsUrlInput, setMapsUrlInput] = useState(settings.mapsUrl);
+  const [storeUrlInput, setStoreUrlInput] = useState(settings.storeUrl || '');
   const [hours, setHours] = useState(settings.hours);
   const [daysOpen, setDaysOpen] = useState(settings.daysOpen);
   const [deliveryArea, setDeliveryArea] = useState(settings.deliveryArea);
@@ -152,6 +153,7 @@ export function OwnerOverviewTab({
     setProvinceInput(settings.province);
     setFullAddressInput(settings.fullAddress);
     setMapsUrlInput(settings.mapsUrl);
+    setStoreUrlInput(settings.storeUrl || '');
     setStoreCoords(settings.storeCoords ?? null);
     setWhatsappNumber(settings.whatsappNumber || '6281279008899');
     setQrisMerchantName(settings.qrisMerchantName || 'TOKO DIMAS JAYA');
@@ -164,6 +166,7 @@ export function OwnerOverviewTab({
     settings.province,
     settings.fullAddress,
     settings.mapsUrl,
+    settings.storeUrl,
     settings.storeCoords,
     settings.whatsappNumber,
     settings.qrisMerchantName,
@@ -559,6 +562,7 @@ export function OwnerOverviewTab({
           province: provinceInput.trim(),
           fullAddress: fullAddressInput.trim(),
           mapsUrl: mapsUrlInput.trim(),
+          storeUrl: storeUrlInput.trim(),
           hours,
           daysOpen,
           deliveryArea,
@@ -1133,6 +1137,24 @@ export function OwnerOverviewTab({
                   className="w-full px-3 py-2 min-h-[40px] text-sm font-mono border border-zinc-300 rounded-lg"
                 />
               </div>
+            </div>
+
+            <div>
+              <label htmlFor="set-store-url" className="block text-xs text-zinc-600 mb-1">
+                Link Web Toko untuk Notifikasi WhatsApp (opsional — kosongkan untuk deteksi otomatis alamat web saat ini)
+              </label>
+              <input
+                id="set-store-url"
+                type="url"
+                value={storeUrlInput}
+                onChange={(e) => setStoreUrlInput(e.target.value)}
+                placeholder={
+                  typeof window !== 'undefined'
+                    ? window.location.origin
+                    : 'https://tokodimasjaya.pages.dev'
+                }
+                className="w-full px-3 py-2 min-h-[40px] text-sm font-mono border border-zinc-300 rounded-lg"
+              />
             </div>
           </div>
 

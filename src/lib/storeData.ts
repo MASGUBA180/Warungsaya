@@ -26,6 +26,7 @@ export const DEFAULT_STORE_SETTINGS: StoreSettings = {
   freeDeliveryMin: 50000,
   mapsUrl:
     'https://www.google.com/maps/search/?api=1&query=Gunung+Batin+Udik+Terusan+Nunyai+Lampung+Tengah',
+  storeUrl: '',
   heroImage: '/src/assets/images/hero_toko_dimas_jaya_1795680105174.jpg',
   whatsappNumber: '6281279008899',
   qrisMerchantName: 'TOKO DIMAS JAYA',
